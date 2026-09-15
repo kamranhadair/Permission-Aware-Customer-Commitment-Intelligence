@@ -27,7 +27,22 @@ The frontend scaffold has been verified end-to-end and needed no code changes:
 - `npm run dev` works; all main routes (`/`, `/accounts/acme-corp`, `/search`, `/audit`) render, and an unknown account correctly 404s
 - `/search` role-sensitive behavior was manually verified against the live dev server: switching the `as` role changes the answer content, not just the UI — Account Manager does **not** receive confidential Product evidence (the answer omits it entirely), while VP Product does receive permitted Product evidence
 
-**No backend exists yet.** Nothing below should be read as backend functionality — there is no database, API, auth, or retrieval pipeline in this repository at this time.
+**No backend exists yet (as of Milestone 1).** Nothing above should be read as backend functionality — there was no database, API, auth, or retrieval pipeline in this repository at that time. See "Milestone 2 — Backend foundation" below for what has since been added.
+
+## Milestone 2 — Backend foundation (complete)
+
+A standalone backend now exists at `backend/`, independent of search/embeddings/LLM, proving the flow: identity → org/group resolution → document ACL resolution → permitted documents → permitted chunks → commitments with permission-filtered supporting/conflicting evidence.
+
+- Stack: FastAPI + SQLAlchemy 2.0 (sync) + PostgreSQL + Alembic + pytest, per `backend/pyproject.toml`.
+- Dev-only identity: an `X-User-Id` request header, resolved against the database — the client is never trusted to assert its own org/groups/role. `role` remains display-only and is never read for authorization.
+- **Single authorization chokepoint**: `backend/src/app/permissions/resolver.py`. Routers never construct ACL queries themselves (`backend/tests/test_architecture.py` is a static guardrail for this; the real proof is the behavioral tests below).
+- **Account visibility is derived from document access**, not organization membership: `GET /accounts` and `GET /accounts/{slug}` only ever return accounts for which the caller has at least one permitted source document. There is no `account_acl` table.
+- **Commitment visibility is derived from supporting evidence**: a commitment is only returned if at least one of its `supporting` evidence chunks is permitted. Permitted `conflicting` evidence is included: if the caller has no permitted conflicting evidence, the response contains an empty list with no separate field or flag indicating anything was withheld.
+- **Tenant isolation is structural, not a duplicated `org_id` column**: `source_documents`, `chunks`, and `commitments` carry no `org_id` of their own — every resolver query reaches them by joining down from `accounts` (the only table carrying `org_id` for this lineage) with an explicit `Account.org_id == user_ctx.org_id` predicate, so a missing join fails closed (returns nothing) instead of leaking another org's data.
+- A nonexistent account, a cross-org account, and a same-org account the caller has no permitted documents for all return an identical `404` — resource enumeration cannot distinguish them.
+- API surface is intentionally minimal: `GET /health`, `GET /accounts`, `GET /accounts/{slug}`, `GET /accounts/{slug}/commitments`, `GET /accounts/{slug}/chunks`. No generic `/chunks/{id}` or `/evidence` endpoint.
+- Tests run against a real PostgreSQL database via `TEST_DATABASE_URL` (see `backend/.env.example`), not SQLite — `backend/tests/` covers direct/group ACL grants, membership revocation, role-is-not-authorization, chunk inheritance, sensitivity having no effect on access, cross-org access (including malformed cross-org group memberships/ACLs), and every commitment-evidence visibility combination (permitted support, forbidden support, permitted/forbidden conflict, malformed cross-account evidence links).
+- **The frontend is still entirely on mock data and is not wired to this backend.** `frontend/src/data/mockData.ts` remains the source of truth for the UI; connecting them is future work.
 
 ## Current architecture
 
@@ -53,9 +68,11 @@ Where to look for each concern:
 
 Note: `/` and `/accounts/[accountId]` currently always render as `currentUser` (`product-manager`); only `/search` supports switching role via `?as=`. This is a known, accepted cosmetic inconsistency (Milestone 1 decision), not a permission-safety issue — nothing unpermitted is ever shown, the other two screens just don't expose the role switcher yet.
 
-### Adding a backend later
+### Backend status and wiring the frontend later
 
-Prefer a small repository interface returning the existing `frontend/src/types/domain.ts` types (example in `docs/architecture.md`) rather than reshaping components around a wire format. `docs/architecture.md` also sketches the intended future retrieval path (identity → permission resolver → ACL filter → retrieval → rerank → LLM → citations/trace) — this is documentation of intent, not something implemented in this repo yet.
+The backend described in "Milestone 2 — Backend foundation" above now implements the first part of `docs/architecture.md`'s future retrieval path (identity → permission resolver → ACL filter → permitted documents/chunks/commitments). Retrieval, reranking, and LLM generation remain unimplemented, and the frontend is not connected to it.
+
+When frontend integration happens, prefer a small repository interface returning the existing `frontend/src/types/domain.ts` types rather than reshaping components around the backend's wire format. Note the backend's Pydantic response contracts already differ from `domain.ts` in a couple of deliberate ways: `Evidence.allowedUsers`/`allowedGroups` are not exposed over the API (ACL membership is server-side authorization data, not something a client should receive), and a commitment's evidence is returned embedded and pre-filtered (`supporting_evidence`/`conflicting_evidence` as full objects) rather than as `evidenceIds`/`conflictingEvidenceIds` arrays, since there is no generic evidence-by-id endpoint to resolve them against.
 
 ## Important domain rules
 
@@ -87,8 +104,6 @@ For every future milestone, follow this process:
 
 The project intentionally avoids premature infrastructure. Currently **not implemented** — do not add any of these without an explicitly approved milestone:
 
-- Backend (no API server exists)
-- PostgreSQL
 - pgvector / vector search
 - Embeddings
 - LLM integration
@@ -130,6 +145,18 @@ Tests use Node's built-in test runner against the TypeScript sources directly (`
 node --experimental-strip-types --test tests/permissions.test.ts
 ```
 
+### Backend commands
+
+Run from `backend/`. Requires a PostgreSQL instance and `backend/.env` (copy `backend/.env.example`) defining `DATABASE_URL` and `TEST_DATABASE_URL`.
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"     # install deps
+alembic upgrade head        # apply migrations to DATABASE_URL
+pytest                      # run the backend test suite against TEST_DATABASE_URL
+uvicorn app.main:app --reload   # run the dev server
+```
+
 ## Milestone status
 
 ```
@@ -141,7 +168,23 @@ The existing frontend is installable, buildable, tested, and suitable as the
 starting foundation. No code changes were required as part of Milestone 1.
 ```
 
-Milestone 2 (backend foundation and data contracts) has been discussed but is **not decided** — its design should be proposed fresh in the next session following the Development workflow above, not assumed from prior conversation.
+```
+Milestone 2 — Backend foundation (permission-aware schema, resolver, minimal API)
+Status: COMPLETE
+
+Result:
+backend/ now exists (FastAPI + SQLAlchemy + PostgreSQL + Alembic). A single
+centralized permission resolver (backend/src/app/permissions/resolver.py)
+derives account visibility from document access and commitment visibility
+from supporting-evidence access; tenant isolation is structural (no
+duplicated org_id columns) rather than convention-maintained. 34 tests pass
+against a real PostgreSQL test database (TEST_DATABASE_URL), covering direct/
+group ACL grants, membership revocation, cross-org access including
+malformed cross-org relational data, and every commitment-evidence
+visibility combination. The frontend is untouched and still uses mock data.
+```
+
+Milestone 3 has not been discussed or decided — its design should be proposed fresh in a future session following the Development workflow above, not assumed from prior conversation.
 
 ## Foreign agent configs detected
 
