@@ -1,0 +1,25 @@
+{
+  "channels": [
+    {
+      "id": "C-ACME-INTERNAL",
+      "name": "product-acme-internal",
+      "account_slug": "acme-corp",
+      "sensitivity": "confidential",
+      "acl": {"users": [], "groups": ["product", "exec"]}
+    },
+    {
+      "id": "C-ACME-SHARED",
+      "name": "acme-customer-shared",
+      "account_slug": "acme-corp",
+      "sensitivity": "customer_shared",
+      "acl": {"users": ["alice@vendor.example"], "groups": ["account-management"]}
+    },
+    {
+      "id": "C-GLOBEX-INTERNAL",
+      "name": "product-globex-internal",
+      "account_slug": "globex-inc",
+      "sensitivity": "internal",
+      "acl": {"users": [], "groups": ["product"]}
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "tickets": [
+    {
+      "id": "TICK-1001",
+      "account_slug": "acme-corp",
+      "subject": "SSO login intermittently fails for Acme admins",
+      "description": "Acme's admin users report SSO redirects fail about once a day.\n\nWorkaround: re-authenticate. No root cause identified yet.",
+      "created_at": "2026-08-01T10:00:00Z",
+      "sensitivity": "internal",
+      "acl": {"users": ["alice@vendor.example"], "groups": []}
+    },
+    {
+      "id": "TICK-1002",
+      "account_slug": "globex-inc",
+      "subject": "Globex requests export API rate limit increase",
+      "description": "Globex's nightly export job is hitting the default rate limit.\n\nSupport has no authority to change limits; escalate to Product.",
+      "created_at": "2026-08-03T14:30:00Z",
+      "sensitivity": "internal",
+      "acl": {"users": [], "groups": ["product"]}
+    },
+    {
+      "id": "TICK-1003",
+      "account_slug": "beta-industries",
+      "subject": "Beta Industries onboarding question",
+      "description": "This ticket belongs to an account that only exists in a different org than the one this fixture is normally ingested against, to exercise cross-org rejection.",
+      "created_at": "2026-08-04T09:15:00Z",
+      "sensitivity": "internal",
+      "acl": {"users": ["alice@vendor.example"], "groups": []}
+    },
+    {
+      "id": "TICK-1004",
+      "account_slug": "acme-corp",
+      "subject": "Malformed record: missing description",
+      "created_at": "2026-08-05T11:00:00Z",
+      "sensitivity": "internal",
+      "acl": {"users": ["alice@vendor.example"], "groups": []}
+    }
+  ]
+}

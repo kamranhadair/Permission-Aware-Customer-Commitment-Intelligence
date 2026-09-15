@@ -42,7 +42,23 @@ A standalone backend now exists at `backend/`, independent of search/embeddings/
 - A nonexistent account, a cross-org account, and a same-org account the caller has no permitted documents for all return an identical `404` — resource enumeration cannot distinguish them.
 - API surface is intentionally minimal: `GET /health`, `GET /accounts`, `GET /accounts/{slug}`, `GET /accounts/{slug}/commitments`, `GET /accounts/{slug}/chunks`. No generic `/chunks/{id}` or `/evidence` endpoint.
 - Tests run against a real PostgreSQL database via `TEST_DATABASE_URL` (see `backend/.env.example`), not SQLite — `backend/tests/` covers direct/group ACL grants, membership revocation, role-is-not-authorization, chunk inheritance, sensitivity having no effect on access, cross-org access (including malformed cross-org group memberships/ACLs), and every commitment-evidence visibility combination (permitted support, forbidden support, permitted/forbidden conflict, malformed cross-account evidence links).
+- Environment config: `backend/.env` (gitignored, local-only) and `backend/.env.example` (committed, no real credentials). `Settings` (`backend/src/app/config.py`) loads `backend/.env` but requires `DATABASE_URL` explicitly — no hardcoded fallback — and a real shell env var always overrides the file. `backend/tests/conftest.py` forces `DATABASE_URL` to `TEST_DATABASE_URL` before any app import, so the test suite cannot accidentally touch the dev database.
+- `alembic check` reports zero drift between `backend/alembic/versions/0001_create_core_schema.py` and the current models — the migration is the authoritative, verified schema, not a snapshot that can silently fall out of sync.
 - **The frontend is still entirely on mock data and is not wired to this backend.** `frontend/src/data/mockData.ts` remains the source of truth for the UI; connecting them is future work.
+
+## Milestone 3 — Ingestion foundation (complete)
+
+A real ingestion pipeline now exists at `backend/src/app/ingestion/`, turning three local fixture source formats (support tickets, call transcripts, Slack exports) into the permission-aware `source_documents`/ACL/`chunks` rows the Milestone 2 resolver already knows how to filter. No embeddings, retrieval, commitment extraction, or real Zendesk/Gong/Slack connectors — ingestion stops at chunks.
+
+- **Pipeline**: pure parsers (`ingestion/parsers/{support,calls,slack}.py`) produce a `NormalizedDocument` (`ingestion/types.py`) with no DB access; `ingestion/service.py` is the sole persistence boundary (parsers never touch SQLAlchemy); `ingestion/chunking.py` is a deterministic, project-owned chunker (~1000 chars, paragraph-aware, no overlap, no tokenizer dependency); `ingestion/cli.py` is a thin dev CLI (`python -m app.ingestion.cli <support|calls|slack> <path> --org-id <int>`) that only does argument parsing, I/O, and reporting.
+- **Identity/idempotency**: `(account_id, source, external_id)` is the upsert key (unique constraint added in migration `0002`). Re-running the same input is a no-op (`unchanged`); unrelated `title`/`occurred_at`/`sensitivity` changes refresh on every re-ingestion even when content is unchanged; a genuine content change replaces chunks (old ones deleted, new ones inserted with a `sequence` column) unless blocked (below).
+- **Legacy compatibility**: `source_documents.external_id`/`content_hash` are nullable — `NULL` on both means "predates ingestion, not source-managed" (Milestone 2 hand-seeded rows). A CHECK constraint (`ck_source_documents_ingestion_identity`) forbids the half-managed state (one set, one not). A `NULL` `external_id` can never match the upsert lookup, so ingestion can never accidentally adopt a legacy row.
+- **ACL synchronization, not just resolution**: on every re-ingestion, `service.py` diffs the source's declared ACL against the currently-persisted grants and reconciles both directions (revokes what the source no longer declares, adds what it newly declares) — this is *document*-ACL sync from re-ingested source data, distinct from *group-membership* sync from a real identity provider, which remains the Milestone 2 resolver's job and is still not connected to any external IdP.
+- **Security-critical ordering in `_update_document`**: ACL revocations are computed from the raw declared identities (emails/group names) and always applied, *before* any attempt to resolve newly-declared principals. An unresolvable new principal, or a content change to a document whose existing chunks are referenced by `commitment_evidence`, can defer new grants and the content/metadata/chunk update (`blocked` outcome, non-zero CLI exit) — but neither can ever leave an obsolete grant active. Missing ACL metadata (`acl=None`) is a plain rejection with no revocation inferred; an explicitly empty ACL (`{users: [], groups: []}`) persists and is visible to nobody.
+- **Transactions**: one commit (or rollback) per document, owned entirely by `service.py` — the CLI has no transactional responsibility. Same-batch duplicate `(source, account_slug, external_id)` rejects the second occurrence; cross-run identity reuse is the normal upsert path.
+- **Tests**: `backend/tests/test_ingestion_{parsers,service,idempotency,migration,e2e,cli}.py`, 37 tests, run against the same real-PostgreSQL `TEST_DATABASE_URL` pattern as Milestone 2. Covers all three parsers (including Slack's root/reply thread-grouping and orphan-reply rejection), user/group ACL persistence, explicit-empty-vs-missing ACL, cross-org rejection, idempotency, content-change chunk replacement, ACL add/revoke on re-ingestion, the evidence-reference block (including the revoke-anyway-despite-unresolved-principal case), migration `0002` backfill against pre-existing Milestone 2 rows, and a fixture-file (not hand-crafted) end-to-end round trip through the real resolver.
+- **Fixtures**: `backend/fixtures/{support,calls,slack}/` — synthetic data only, covering multiple accounts/orgs, direct-user and group ACL grants, a confidential source inaccessible to one test user, and a cross-org account reference for rejection testing.
+- Frontend untouched; still on mock data.
 
 ## Current architecture
 
@@ -70,7 +86,7 @@ Note: `/` and `/accounts/[accountId]` currently always render as `currentUser` (
 
 ### Backend status and wiring the frontend later
 
-The backend described in "Milestone 2 — Backend foundation" above now implements the first part of `docs/architecture.md`'s future retrieval path (identity → permission resolver → ACL filter → permitted documents/chunks/commitments). Retrieval, reranking, and LLM generation remain unimplemented, and the frontend is not connected to it.
+The backend described in "Milestone 2 — Backend foundation" above now implements the first part of `docs/architecture.md`'s future retrieval path (identity → permission resolver → ACL filter → permitted documents/chunks/commitments). Retrieval, reranking, and LLM generation remain unimplemented, and the frontend is not connected to it. See `docs/architecture.md`'s "What Milestone 2 actually implemented" subsection for the full implemented-now-vs-still-future split.
 
 When frontend integration happens, prefer a small repository interface returning the existing `frontend/src/types/domain.ts` types rather than reshaping components around the backend's wire format. Note the backend's Pydantic response contracts already differ from `domain.ts` in a couple of deliberate ways: `Evidence.allowedUsers`/`allowedGroups` are not exposed over the API (ACL membership is server-side authorization data, not something a client should receive), and a commitment's evidence is returned embedded and pre-filtered (`supporting_evidence`/`conflicting_evidence` as full objects) rather than as `evidenceIds`/`conflictingEvidenceIds` arrays, since there is no generic evidence-by-id endpoint to resolve them against.
 
@@ -107,9 +123,9 @@ The project intentionally avoids premature infrastructure. Currently **not imple
 - pgvector / vector search
 - Embeddings
 - LLM integration
-- Ingestion/connectors
+- Real Zendesk/Gong/Slack API connectors and OAuth (Milestone 3 added file-based ingestion for these three source *shapes* via local fixtures — connecting to the real APIs is still not built)
 - Real authentication
-- ACL synchronization
+- ACL synchronization *from external identity/document systems* (Milestone 3 added document-ACL synchronization *from re-ingested source data* on every re-ingestion — group *membership* sync from a real identity provider is still not built; see `future/README.md` item 4)
 - Reranking
 - Background queues/workers
 - OpenSearch
@@ -155,6 +171,12 @@ pip install -e ".[dev]"     # install deps
 alembic upgrade head        # apply migrations to DATABASE_URL
 pytest                      # run the backend test suite against TEST_DATABASE_URL
 uvicorn app.main:app --reload   # run the dev server
+
+# Ingestion CLI (Milestone 3) — org/accounts/users/groups must already exist;
+# ingestion does not provision them.
+python -m app.ingestion.cli support fixtures/support/tickets.json --org-id <id>
+python -m app.ingestion.cli calls   fixtures/calls/calls.json     --org-id <id>
+python -m app.ingestion.cli slack   fixtures/slack               --org-id <id>
 ```
 
 ## Milestone status
@@ -182,9 +204,75 @@ against a real PostgreSQL test database (TEST_DATABASE_URL), covering direct/
 group ACL grants, membership revocation, cross-org access including
 malformed cross-org relational data, and every commitment-evidence
 visibility combination. The frontend is untouched and still uses mock data.
+
+Closed out with a follow-up verification pass: every security invariant
+re-checked directly against the committed code (not from memory), a fresh
+empty-database migration plus `alembic check` (zero drift from models), an
+HTTP smoke test confirming the Account Manager / Product Manager permission
+distinction, and a clean frontend regression (typecheck/tests/build).
+docs/architecture.md and future/README.md updated to distinguish
+implemented-now from still-future architecture.
 ```
 
-Milestone 3 has not been discussed or decided — its design should be proposed fresh in a future session following the Development workflow above, not assumed from prior conversation.
+```
+Milestone 3 — Ingestion foundation (support tickets, call transcripts, Slack exports)
+Status: COMPLETE
+
+Result:
+backend/src/app/ingestion/ now exists: three pure, DB-free parsers
+(support/calls/slack) produce a NormalizedDocument consumed by a single
+persistence boundary (service.py), which upserts source_documents/chunks
+under a new (account_id, source, external_id) identity key, synchronizes
+document ACLs on every re-ingestion, and deterministically chunks content.
+Migration 0002 added external_id/content_hash (nullable, for legacy-row
+compatibility, with a CHECK constraint forbidding the half-managed state)
+and chunks.sequence (backfilled deterministically from existing chunk.id
+order). 37 new tests pass against the real PostgreSQL test database,
+covering both parsers and every security-relevant service behavior:
+explicit-empty-vs-missing ACL, cross-org rejection, idempotency, content-
+change chunk replacement, ACL add/revoke on re-ingestion, the evidence-
+reference block, the revoke-anyway-despite-unresolved-principal case, the
+migration backfill against pre-existing rows, and a fixture-file (not
+hand-crafted) end-to-end round trip through the unmodified Milestone 2
+resolver. 71/71 backend tests pass overall; the resolver itself was not
+modified. Frontend regression (typecheck/tests/build) confirms zero
+frontend changes. Manually verified against the dev database: all three
+CLIs ingest cleanly with correct non-zero exit codes on cross-org/
+malformed records, a second run of each produces no duplicates, and the
+live API confirms the Account Manager / Product group permission
+distinction on ingested (not hand-seeded) data, including a clean 404 on
+the cross-org account. Design went through three review rounds before
+implementation (see prior conversation for the full rationale behind each
+correction — not reproduced here since the code and tests are now the
+source of truth).
+
+Key decisions, for quick reference:
+- `--org-id` (integer, required) — organizations has no slug column.
+- Metadata (title/occurred_at/sensitivity) refreshes on every successful
+  re-ingestion regardless of whether content changed; content_hash only
+  gates chunk replacement.
+- ACL revocations, computed from the raw declared identities, always
+  apply on an existing document — never blocked by an unresolvable new
+  principal or by a content update being blocked. Only new grants and
+  the content/metadata/chunk update can be deferred (`blocked` outcome).
+- A content change to a document whose existing chunks are referenced by
+  commitment_evidence is blocked (not committed) rather than solved with
+  chunk versioning or `ON DELETE CASCADE` — an intentional Milestone 3
+  limitation for a future evidence-lifecycle milestone to resolve.
+- Slack documents are one per thread or one per standalone message
+  (`channel_id:thread_ts` or `channel_id:ts`), grouped by locating each
+  reply's root by `ts == thread_ts` (not by requiring the root to declare
+  its own `thread_ts`); ACL/account/sensitivity always come from the
+  parent channel.
+- Missing ACL metadata (`acl=None`) is a plain rejection with no
+  revocation inferred; an explicitly empty ACL persists and is visible to
+  nobody.
+- One commit (or rollback) per document, owned by service.py, never the
+  CLI; a duplicate `(source, account_slug, external_id)` within one input
+  batch rejects the second occurrence.
+- Ingestion does not provision organizations/accounts/users/groups/
+  memberships — those must already exist.
+```
 
 ## Foreign agent configs detected
 

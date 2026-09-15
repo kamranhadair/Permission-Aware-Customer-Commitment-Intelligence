@@ -66,6 +66,39 @@ keyword/vector retrieval
 
 Tenant isolation (`accounts.org_id` is the only place org is recorded; documents/chunks/commitments have no `org_id` of their own and are reached only by joining down from `accounts`) and account/commitment visibility being *derived* from document/evidence access, rather than granted by org or account membership, are both implemented now and covered by `backend/tests/`.
 
+### What Milestone 3 actually implemented
+
+Milestone 3 (`backend/src/app/ingestion/`) sits *upstream* of the diagram above — it's what populates `source_documents`/ACLs/`chunks` in the first place, not a change to the request-time resolver path:
+
+```
+IMPLEMENTED NOW (in addition to Milestone 2's list)
+source-specific parsing (support tickets, call transcripts, Slack exports
+  — local fixtures, not real connectors)
+  → normalized document + ACL declaration
+  → account/principal resolution against the same org-scoped tables the
+    resolver reads
+  → idempotent upsert keyed on (account_id, source, external_id)
+  → document-ACL synchronization from the source's declared ACL on every
+    re-ingestion (add what's newly granted, revoke what's no longer
+    declared — safe revocations always apply even when a new grant or a
+    content update is blocked)
+  → deterministic chunking, replaced wholesale on a genuine content
+    change (unless blocked by an evidence reference — see CLAUDE.md's
+    Milestone 3 status block)
+
+STILL FUTURE (unchanged)
+real Zendesk/Gong/Slack API connectors and OAuth
+  → keyword/vector retrieval
+  → reranking
+  → authority/conflict resolution beyond evidence-visibility gating
+  → LLM generation
+  → citations/query-trace pipeline
+  → a real enterprise identity provider
+  → group-membership sync from that provider (ingestion syncs *document*
+    ACLs from source data; the resolver still owns group membership, and
+    nothing syncs that membership from an external system)
+```
+
 ## Frontend feature boundaries
 
 - `features/accounts` owns account-level presentation.

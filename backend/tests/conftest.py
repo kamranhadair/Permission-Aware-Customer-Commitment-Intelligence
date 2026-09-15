@@ -49,15 +49,32 @@ def engine():
 
 @pytest.fixture()
 def db(engine):
-    """One test = one transaction, rolled back at teardown for isolation."""
+    """One test = one outer transaction, rolled back at teardown for
+    isolation — even though ingestion service code calls session.commit()
+    per document (real per-document transactions being the whole point
+    of that design). The standard SQLAlchemy recipe for this: the test's
+    real work happens in a SAVEPOINT, and an event listener restarts a
+    fresh SAVEPOINT every time the session's `commit()` ends one, so a
+    "commit" from the code under test never reaches the outer transaction
+    that this fixture rolls back at teardown.
+    """
+    from sqlalchemy import event
+
     connection = engine.connect()
-    transaction = connection.begin()
+    outer_transaction = connection.begin()
     session = sessionmaker(bind=connection, future=True)()
+    session.begin_nested()
+
+    @event.listens_for(session, "after_transaction_end")
+    def _restart_savepoint(sess, transaction):
+        if transaction.nested and not transaction._parent.nested:
+            sess.begin_nested()
+
     try:
         yield session
     finally:
         session.close()
-        transaction.rollback()
+        outer_transaction.rollback()
         connection.close()
 
 

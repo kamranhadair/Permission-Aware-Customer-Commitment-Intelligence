@@ -1,0 +1,43 @@
+{
+  "messages": [
+    {
+      "channel_id": "C-ACME-INTERNAL",
+      "ts": "1722000000.0001",
+      "user": "bob@vendor.example",
+      "text": "November SSO date is exploratory — do not communicate it externally yet."
+    },
+    {
+      "channel_id": "C-ACME-INTERNAL",
+      "ts": "1722000060.0002",
+      "thread_ts": "1722000000.0001",
+      "user": "carol@vendor.example",
+      "text": "Agreed, Product hasn't approved that date."
+    },
+    {
+      "channel_id": "C-ACME-INTERNAL",
+      "ts": "1722000120.0003",
+      "thread_ts": "1722000000.0001",
+      "user": "bob@vendor.example",
+      "text": "I'll flag this to the AE before the next customer call."
+    },
+    {
+      "channel_id": "C-ACME-SHARED",
+      "ts": "1722010000.0001",
+      "user": "alice@vendor.example",
+      "text": "Shared the latest release notes with the Acme admin team."
+    },
+    {
+      "channel_id": "C-GLOBEX-INTERNAL",
+      "ts": "1722020000.0001",
+      "user": "bob@vendor.example",
+      "text": "Rate limit increase for Globex is on the Q4 roadmap, unscheduled."
+    },
+    {
+      "channel_id": "C-GLOBEX-INTERNAL",
+      "ts": "1722020100.0002",
+      "thread_ts": "1722099999.9999",
+      "user": "carol@vendor.example",
+      "text": "Malformed record: this reply's thread_ts does not match any message in this channel."
+    }
+  ]
+}

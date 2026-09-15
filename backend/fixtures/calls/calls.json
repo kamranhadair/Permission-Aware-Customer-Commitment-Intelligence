@@ -1,0 +1,30 @@
+{
+  "calls": [
+    {
+      "id": "CALL-2001",
+      "account_slug": "acme-corp",
+      "title": "Acme quarterly business review",
+      "transcript": "AE: Thanks for joining the QBR.\n\nCustomer: We're happy with uptime this quarter, but still waiting on the SSO fix.\n\nAE: Understood, I'll follow up with support on ticket TICK-1001.",
+      "occurred_at": "2026-08-06T15:00:00Z",
+      "sensitivity": "customer_shared",
+      "acl": {"users": [], "groups": ["account-management"]}
+    },
+    {
+      "id": "CALL-2002",
+      "account_slug": "globex-inc",
+      "title": "Globex renewal discussion",
+      "transcript": "AE: Renewal is coming up next month.\n\nCustomer: We'd like the export rate limit raised before we renew.\n\nAE: Passing that to Product.",
+      "occurred_at": "2026-08-07T09:00:00Z",
+      "sensitivity": "customer_shared",
+      "acl": {"users": [], "groups": ["account-management"]}
+    },
+    {
+      "id": "CALL-2003",
+      "account_slug": "acme-corp",
+      "title": "Malformed record: missing transcript",
+      "occurred_at": "2026-08-08T09:00:00Z",
+      "sensitivity": "customer_shared",
+      "acl": {"users": [], "groups": ["account-management"]}
+    }
+  ]
+}

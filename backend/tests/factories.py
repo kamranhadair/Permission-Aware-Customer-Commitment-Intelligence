@@ -6,6 +6,7 @@ resolver fails closed against it.
 
 from datetime import date, datetime, timezone
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -86,7 +87,8 @@ def grant_group_acl(db: Session, document: SourceDocument, group: Group) -> None
 
 
 def make_chunk(db: Session, document: SourceDocument, content: str = "content") -> Chunk:
-    chunk = Chunk(document_id=document.id, content=content)
+    existing_count = db.scalar(select(func.count()).select_from(Chunk).where(Chunk.document_id == document.id))
+    chunk = Chunk(document_id=document.id, content=content, sequence=existing_count)
     db.add(chunk)
     db.flush()
     return chunk
