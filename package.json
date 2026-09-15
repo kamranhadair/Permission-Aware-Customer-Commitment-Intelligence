@@ -1,0 +1,12 @@
+{
+  "name": "permission-aware-commitment-intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["frontend"],
+  "scripts": {
+    "dev": "npm run dev --workspace commitment-intelligence-frontend",
+    "build": "npm run build --workspace commitment-intelligence-frontend",
+    "typecheck": "npm run typecheck --workspace commitment-intelligence-frontend",
+    "test": "npm run test --workspace commitment-intelligence-frontend"
+  }
+}
