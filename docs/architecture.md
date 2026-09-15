@@ -40,6 +40,32 @@ Citations + trace
 
 The ACL constraint belongs before retrieval. A forbidden chunk should not appear in candidate lists, reranker inputs, generation context, citations, or user-visible trace content.
 
+### What Milestone 2 actually implemented
+
+The diagram above described this whole path as future work. As of Milestone 2 (`backend/`), the first two stages are real, not hypothetical — the rest remain future:
+
+```text
+IMPLEMENTED NOW
+identity injection (dev-only X-User-Id header)
+  → DB user/org/group resolution (never trusts the request for roles/groups)
+  → permission resolver (backend/src/app/permissions/resolver.py)
+  → ACL-filtered accounts/documents/chunks
+  → permission-derived commitment/evidence visibility
+    (a commitment is only returned if ≥1 of its supporting evidence chunks
+    is permitted; forbidden conflicting evidence is omitted without a
+    trace of its existence)
+
+STILL FUTURE
+keyword/vector retrieval
+  → reranking
+  → authority/conflict resolution beyond evidence-visibility gating
+  → LLM generation
+  → citations/query-trace pipeline
+  → a real enterprise identity provider (X-User-Id is dev-only, not auth)
+```
+
+Tenant isolation (`accounts.org_id` is the only place org is recorded; documents/chunks/commitments have no `org_id` of their own and are reached only by joining down from `accounts`) and account/commitment visibility being *derived* from document/evidence access, rather than granted by org or account membership, are both implemented now and covered by `backend/tests/`.
+
 ## Frontend feature boundaries
 
 - `features/accounts` owns account-level presentation.
@@ -52,7 +78,7 @@ The ACL constraint belongs before retrieval. A forbidden chunk should not appear
 
 ## Backend attachment point
 
-When a backend is added, prefer a small API client/repository layer that returns the existing domain types. Avoid rewriting components around backend response shapes.
+A backend now exists (`backend/`, see Milestone 2 status above), but the frontend is not wired to it yet — that remains future work, deliberately out of scope for Milestone 2. When that wiring happens, prefer a small API client/repository layer that returns the existing domain types. Avoid rewriting components around backend response shapes.
 
 Example future boundary:
 
@@ -62,4 +88,6 @@ interface CommitmentRepository {
 }
 ```
 
-V1 does not need this interface until there is an actual backend implementation to swap in; adding layers solely for hypothetical flexibility is intentionally avoided.
+The frontend does not need this interface until it is actually being wired to the backend; adding layers solely for hypothetical flexibility is intentionally avoided.
+
+Note that the backend's response contracts already differ from `frontend/src/types/domain.ts` in two deliberate ways worth resolving at wiring time: `Evidence.allowedUsers`/`allowedGroups` are not exposed over the API (ACL membership is server-side authorization data), and a commitment's evidence comes back embedded and pre-filtered (`supporting_evidence`/`conflicting_evidence` as full objects) rather than as `evidenceIds`/`conflictingEvidenceIds` arrays, since there is no generic evidence-by-id endpoint to resolve them against.
