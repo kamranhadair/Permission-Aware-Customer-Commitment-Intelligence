@@ -1,0 +1,93 @@
+{
+  "queries": [
+    {
+      "id": "q1",
+      "category": "exact_lexical",
+      "query": "SSO login intermittently fails",
+      "persona": "alice",
+      "account_slug": "acme-corp",
+      "expected": [{"source": "support", "external_id": "TICK-1001"}]
+    },
+    {
+      "id": "q2",
+      "category": "paraphrase_semantic",
+      "query": "customers can't reliably sign in through single sign on",
+      "persona": "alice",
+      "account_slug": "acme-corp",
+      "expected": [{"source": "support", "external_id": "TICK-1001"}]
+    },
+    {
+      "id": "q3",
+      "category": "source_conflict",
+      "query": "will the SSO fix ship in November",
+      "persona": "bob",
+      "account_slug": "acme-corp",
+      "expected": [
+        {"source": "call", "external_id": "CALL-2001"},
+        {"source": "slack", "external_id": "C-ACME-INTERNAL:1722000000.0001"}
+      ],
+      "note": "Customer-facing call (no committed date) vs. internal Slack thread (unapproved November date) — a real conflict, visible only to a persona (bob, product) who can see both."
+    },
+    {
+      "id": "q4",
+      "category": "permission_exclusion",
+      "query": "will the SSO fix ship in November",
+      "persona": "alice",
+      "account_slug": "acme-corp",
+      "expected": [{"source": "call", "external_id": "CALL-2001"}],
+      "forbidden": [{"source": "slack", "external_id": "C-ACME-INTERNAL:1722000000.0001"}],
+      "note": "Same query as q3, but alice (account-management only) must never see the product/exec-only Slack thread — not even its existence."
+    },
+    {
+      "id": "q5",
+      "category": "temporal",
+      "query": "current status of the Acme SSO problem",
+      "persona": "alice",
+      "account_slug": "acme-corp",
+      "expected": [{"source": "call", "external_id": "CALL-2001"}],
+      "note": "The 2026-08-06 QBR call is more current than the 2026-08-01 ticket; expect it ranked first among alice's permitted evidence."
+    },
+    {
+      "id": "q6",
+      "category": "permission_exclusion",
+      "query": "November SSO date exploratory Product approval",
+      "persona": "alice",
+      "account_slug": "acme-corp",
+      "expected": [],
+      "note": "This phrase only exists in the product/exec-only Slack thread; alice must get zero results, not a redacted one."
+    },
+    {
+      "id": "q7",
+      "category": "permission_exclusion",
+      "query": "November SSO date exploratory Product approval",
+      "persona": "bob",
+      "account_slug": "acme-corp",
+      "expected": [{"source": "slack", "external_id": "C-ACME-INTERNAL:1722000000.0001"}]
+    },
+    {
+      "id": "q8",
+      "category": "exact_lexical",
+      "query": "export API rate limit increase",
+      "persona": "bob",
+      "account_slug": "globex-inc",
+      "expected": [{"source": "support", "external_id": "TICK-1002"}]
+    },
+    {
+      "id": "q9",
+      "category": "permission_exclusion",
+      "query": "export API rate limit increase",
+      "persona": "alice",
+      "account_slug": "globex-inc",
+      "forbidden": [{"source": "support", "external_id": "TICK-1002"}],
+      "note": "TICK-1002 is product-group-only; alice (account-management) may still see globex-inc via CALL-2002 but must never see this ticket."
+    },
+    {
+      "id": "q10",
+      "category": "paraphrase_semantic",
+      "query": "will we get more headroom on our nightly export job",
+      "persona": "bob",
+      "account_slug": "globex-inc",
+      "expected": [{"source": "support", "external_id": "TICK-1002"}]
+    }
+  ]
+}

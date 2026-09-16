@@ -60,6 +60,24 @@ A real ingestion pipeline now exists at `backend/src/app/ingestion/`, turning th
 - **Fixtures**: `backend/fixtures/{support,calls,slack}/` — synthetic data only, covering multiple accounts/orgs, direct-user and group ACL grants, a confidential source inaccessible to one test user, and a cross-org account reference for rejection testing.
 - Frontend untouched; still on mock data.
 
+## Milestone 4 — Permission-aware hybrid retrieval (complete)
+
+A retrieval layer now exists at `backend/src/app/retrieval/`, searching the chunks Milestone 3 ingested using PostgreSQL full-text search and pgvector similarity, merged via Reciprocal Rank Fusion — with authorization enforced as part of candidate generation, not as a post-search filter.
+
+- **The core invariant**: an unauthorized chunk is never a lexical candidate, never a vector candidate, never a hybrid candidate, never returned, and never named in a user-visible trace. Both `retrieval/lexical.py` and `retrieval/vector.py` compute their permitted-chunk scope by calling the same `permissions/resolver.py` function every other permission-aware query in the codebase uses (`get_permitted_document_ids`, generalized to accept `account_id: int | None` for "all accounts visible to this user"), then apply that scope in the `WHERE` clause *before* ranking — there is no "search globally, filter in Python" step anywhere in the retrieval path.
+- **Lexical retrieval**: PostgreSQL native full-text search (`to_tsvector('english', content)` / `plainto_tsquery` / `ts_rank`), backed by a GIN expression index (migration `0003`) rather than a stored `tsvector` column — nothing to backfill, nothing that can go stale relative to `content` across Milestone 3's delete+reinsert chunk replacement.
+- **Vector retrieval**: pgvector, **exact (brute-force) cosine-distance search, not an approximate HNSW/IVFFlat index** (migration `0004` creates the `vector` extension and a nullable `chunks.embedding vector(384)` column, but no ANN index). This is a deliberate prototype trade-off: an approximate index's own traversal could, in principle, decide which rows are even considered before a permission predicate gets a chance to exclude them, whereas exact search evaluates the permission predicate and `embedding IS NOT NULL` against literal rows first, so there is no code path where an unauthorized or unembedded row can become a candidate. The accepted cost is brute-force scan performance at scale — explicitly not solved here.
+- **Embedding provider**: one configured model, `BAAI/bge-small-en-v1.5` (384-dim), run locally via `sentence-transformers` — no external API, no API key (`backend/.env.example` is therefore unchanged). `retrieval/embeddings.py` defines a two-method `EmbeddingProvider` protocol with exactly two implementations: `BgeEmbeddingProvider` (lazy-loads the real model, never imported at module load time) and `FakeEmbeddingProvider` (deterministic, hash-seeded, pure Python) — the latter is what the entire security/functional test suite uses, so `pytest` never imports `sentence-transformers`/`torch`. The dependency is split accordingly in `pyproject.toml`: `pgvector` is a base dependency; `sentence-transformers` is behind an optional `embeddings` extra needed only for the real provider, `embed_missing`, and `evaluate.py`.
+- **Embedding lifecycle**: `chunks.embedding` is nullable. New chunks and content-changed replacement chunks (Milestone 3's delete+reinsert) always start unembedded; there is no trigger and no background worker. `python -m app.retrieval.embed_missing` is an explicit, manually-run backfill command that embeds every chunk with `embedding IS NULL` in batches. An unembedded chunk is not a retrieval failure — it simply cannot become a vector candidate and remains reachable through lexical search alone until backfilled.
+- **Hybrid merge**: Reciprocal Rank Fusion (`retrieval/hybrid.py`, `k=60`), chosen over score normalization because `ts_rank` and cosine distance are on incomparable scales and normalization (min-max/z-score) is unstable for small candidate sets. RRF is a pure function with no DB access, so merge determinism is unit-tested directly. Reranking beyond RRF is explicitly deferred, not added.
+- **Retrieval service boundary**: `retrieval/service.py`'s `retrieve()` is the single entry point — it resolves account-slug scope through the same `get_visible_account` Milestone 2 uses (returning `None`, not a distinguishing error, for a nonexistent/cross-org/zero-permitted-document account, exactly like the existing account/commitment endpoints), calls both search channels, merges, and builds the trace.
+- **Safe retrieval trace**: `RetrievalTrace` is safe by construction, not by redaction — every chunk id it contains (lexical candidates, vector candidates, merged ranking, returned ids) was already produced by a permission-scoped query, so there is no "filtered out N confidential results" computation anywhere to accidentally leak. The trace is returned in-memory/over the API response; nothing is persisted to a query-trace table in this milestone.
+- **API surface**: `POST /search` (`backend/src/app/routers/search.py`), body `{query, account_slug?}`, identity via the existing dev-only `X-User-Id` header (401 without it) — the client can never assert its own role/groups/org, matching every other endpoint.
+- **Result contract**: `RetrievalHit` carries only `chunk_id`, `document_id`, `account_id`, `source`, `title`, `content`, `occurred_at`, `lexical_rank`, `vector_rank`, `hybrid_score` — no ACL principals, no sensitivity label, no hidden candidate counts.
+- **Tests**: `backend/tests/test_retrieval_{lexical,vector,hybrid,service,migration,quality}.py` and `test_search_api.py` — adversarially constructed (e.g. a forbidden chunk that lexically outranks, or is mathematically closer to the query vector than, the permitted chunk must still never appear as a candidate), plus direct/group ACL grants, membership/ACL revocation freshness, cross-org rejection, account-scoped vs. all-accounts privacy, no-ACL-fields-in-response, and one full ingestion-fixture-to-retrieval end-to-end round trip.
+- **Retrieval-quality evaluation**: `backend/fixtures/retrieval_eval/golden_queries.json` (10 queries: exact lexical, paraphrase/semantic, source conflict, temporal/stale, permission exclusion, both direct-user and group ACL grants) plus `python -m app.retrieval.evaluate` (not part of `pytest`; requires the `embeddings` extra) computing Recall@5, Recall@10, MRR per category, and the hard security gate `unauthorized_candidate_count == 0`. Known gap: no query yet empirically demonstrates hybrid fusion being *necessary* against the real embedding model (RRF's combination logic is proven at the unit level in `test_retrieval_hybrid.py` with synthetic ranks, not yet by a real query where neither channel alone would surface the target chunk) — left as a candidate item for the eventual full golden dataset rather than added here to avoid an unverified/padded case.
+- Frontend untouched; still on mock data. No LLM generation, no citations, no reranking, no persisted trace storage.
+
 ## Current architecture
 
 ```
@@ -86,7 +104,7 @@ Note: `/` and `/accounts/[accountId]` currently always render as `currentUser` (
 
 ### Backend status and wiring the frontend later
 
-The backend described in "Milestone 2 — Backend foundation" above now implements the first part of `docs/architecture.md`'s future retrieval path (identity → permission resolver → ACL filter → permitted documents/chunks/commitments). Retrieval, reranking, and LLM generation remain unimplemented, and the frontend is not connected to it. See `docs/architecture.md`'s "What Milestone 2 actually implemented" subsection for the full implemented-now-vs-still-future split.
+The backend now implements identity → permission resolver → ACL filter → permitted documents/chunks/commitments (Milestone 2), source ingestion into that same permission-aware schema (Milestone 3), and permission-aware lexical/vector/hybrid retrieval over ingested chunks (Milestone 4) — see `docs/architecture.md`'s "What Milestone 4 actually implemented" subsection. Reranking beyond RRF, LLM generation, and citations remain unimplemented, and the frontend is not connected to any of this yet.
 
 When frontend integration happens, prefer a small repository interface returning the existing `frontend/src/types/domain.ts` types rather than reshaping components around the backend's wire format. Note the backend's Pydantic response contracts already differ from `domain.ts` in a couple of deliberate ways: `Evidence.allowedUsers`/`allowedGroups` are not exposed over the API (ACL membership is server-side authorization data, not something a client should receive), and a commitment's evidence is returned embedded and pre-filtered (`supporting_evidence`/`conflicting_evidence` as full objects) rather than as `evidenceIds`/`conflictingEvidenceIds` arrays, since there is no generic evidence-by-id endpoint to resolve them against.
 
@@ -120,17 +138,19 @@ For every future milestone, follow this process:
 
 The project intentionally avoids premature infrastructure. Currently **not implemented** — do not add any of these without an explicitly approved milestone:
 
-- pgvector / vector search
-- Embeddings
-- LLM integration
+- LLM integration (generation, prompt construction, citations)
 - Real Zendesk/Gong/Slack API connectors and OAuth (Milestone 3 added file-based ingestion for these three source *shapes* via local fixtures — connecting to the real APIs is still not built)
 - Real authentication
 - ACL synchronization *from external identity/document systems* (Milestone 3 added document-ACL synchronization *from re-ingested source data* on every re-ingestion — group *membership* sync from a real identity provider is still not built; see `future/README.md` item 4)
-- Reranking
+- Reranking beyond the RRF hybrid merge (Milestone 4 added permission-aware lexical + vector retrieval with an RRF merge — a further reranking stage, e.g. a cross-encoder, is still not built; see `future/README.md` item 6)
+- Persisted/audit query-trace storage (Milestone 4's `RetrievalTrace` is an in-memory, safe-by-construction return value, not a database table; see `future/README.md` item 9)
+- The full 50+ question golden evaluation suite (Milestone 4 added a 10-query retrieval-only slice; see `docs/evaluation.md` and `future/README.md` item 10)
 - Background queues/workers
 - OpenSearch
 - OpenFGA
 - WorkOS
+
+pgvector, chunk embeddings, and PostgreSQL full-text search were added in Milestone 4 (`backend/src/app/retrieval/`) — these are no longer on the deferred list, but remain scoped exactly as documented there: one embedding model, exact (not approximate) vector search, no reranking.
 
 ## Source-of-truth documents
 
@@ -177,6 +197,16 @@ uvicorn app.main:app --reload   # run the dev server
 python -m app.ingestion.cli support fixtures/support/tickets.json --org-id <id>
 python -m app.ingestion.cli calls   fixtures/calls/calls.json     --org-id <id>
 python -m app.ingestion.cli slack   fixtures/slack               --org-id <id>
+
+# Retrieval (Milestone 4)
+# On a machine with no NVIDIA GPU, install the CPU-only torch build first —
+# plain `pip install sentence-transformers` otherwise pulls PyPI's default
+# CUDA-enabled torch and several GB of unused nvidia_* packages:
+pip install "torch>=2.2" --index-url https://download.pytorch.org/whl/cpu
+pip install -e ".[dev,embeddings]"      # only needed for the real (non-test) embedding provider
+python -m app.retrieval.embed_missing   # backfill chunks.embedding for any chunk where it's NULL
+python -m app.retrieval.evaluate        # small retrieval-quality eval (Recall@5/10, MRR, unauthorized-candidate gate)
+# POST /search  {"query": "...", "account_slug": "..."}  (account_slug optional — omit to search all visible accounts)
 ```
 
 ## Milestone status
@@ -272,6 +302,74 @@ Key decisions, for quick reference:
   batch rejects the second occurrence.
 - Ingestion does not provision organizations/accounts/users/groups/
   memberships — those must already exist.
+```
+
+```
+Milestone 4 — Permission-aware hybrid retrieval (lexical + vector + RRF merge)
+Status: COMPLETE
+
+Result:
+backend/src/app/retrieval/ now exists: permission-scoped PostgreSQL full-text
+search (to_tsvector/plainto_tsquery/ts_rank, GIN expression index) and
+permission-scoped pgvector exact cosine-distance search (no ANN index,
+migration 0004 adds the vector extension and a nullable chunks.embedding
+vector(384) column), merged via Reciprocal Rank Fusion (k=60). Both search
+channels compute their permitted scope through the same
+get_permitted_document_ids resolver function every other permission-aware
+query in the codebase uses — candidate generation itself is authorization-
+constrained, not filtered afterward. A single retrieve() service boundary
+(retrieval/service.py) resolves account-slug scope through the same
+get_visible_account Milestone 2 uses, calls both channels, merges, and
+returns a RetrievalResult with a safe-by-construction RetrievalTrace (every
+id in it was already permission-scoped before the trace was built; no
+"filtered out N" counts exist anywhere). One embedding provider
+(BAAI/bge-small-en-v1.5, local via sentence-transformers, no API key) plus a
+deterministic FakeEmbeddingProvider used by the entire test suite. A single
+POST /search endpoint uses the existing dev-only X-User-Id identity
+mechanism. 103/103 backend tests pass (1 additional test skipped when the
+optional `embeddings` extra isn't installed, by design), including
+adversarial cases (a lexically-stronger or mathematically-closer
+unauthorized chunk must never become a candidate, not just be absent from
+the final top-k), direct-user and group ACL grants, immediate freshness on
+group-membership/document-ACL revocation, cross-org rejection, account-
+scoped vs. all-accounts privacy (no inaccessible-account enumeration), no
+ACL/sensitivity fields in the response, and one full ingestion-fixture-to-
+retrieval end-to-end round trip. Migrations 0003/0004 verified safe against
+a populated (non-empty) database and `alembic check` reports zero drift.
+A 10-query retrieval-quality golden set (fixtures/retrieval_eval/) plus a
+manual (non-pytest) evaluate.py script report Recall@5, Recall@10, MRR per
+category, and the hard security gate unauthorized_candidate_count == 0.
+Frontend untouched; still on mock data. No LLM generation, no citations, no
+reranking beyond RRF, no persisted query-trace storage.
+
+Key decisions, for quick reference:
+- Exact (brute-force) vector search, not HNSW/IVFFlat: the permission
+  predicate and embedding IS NOT NULL are evaluated against literal rows in
+  the WHERE clause before any distance ranking, so there is no approximate-
+  index-traversal step that could surface an unauthorized or unembedded row
+  as a candidate. Accepted trade-off: brute-force scan cost at scale is
+  explicitly not solved in this milestone.
+- RRF over score normalization: ts_rank and cosine distance are on
+  incomparable scales, and min-max/z-score normalization is unstable for
+  small candidate sets (ties are common at prototype scale). RRF only needs
+  ranks, which are always well-defined.
+- Reranking beyond RRF was evaluated and deliberately deferred — proving
+  permission-safe lexical+vector+hybrid retrieval independently first was
+  judged more valuable than adding a reranker on spec.
+- chunks.embedding is nullable; there is no trigger and no background
+  worker. New chunks and content-changed replacement chunks always start
+  unembedded. python -m app.retrieval.embed_missing is the explicit,
+  manually-run backfill; an unembedded chunk is lexical-only, not a
+  retrieval failure.
+- The retrieval-quality golden set intentionally stayed at 10 queries
+  (within the 8-12 target) rather than being padded — one identified gap
+  (no query yet empirically proves hybrid fusion is necessary, as opposed
+  to unit-testing RRF's merge logic on synthetic ranks) was documented in
+  docs/evaluation.md as a candidate for the eventual full golden dataset
+  rather than solved with an unverified add.
+- The retrieval trace is returned in-memory/over the API response only;
+  no query-trace database table was added, matching the "smallest option
+  that satisfies evaluation/debuggability" guidance for this milestone.
 ```
 
 ## Foreign agent configs detected

@@ -27,10 +27,32 @@ Add these only when you are ready to build the real data plane:
    from a real external identity provider — that's a different sync
    problem, and nothing in this repository connects to a real IdP yet.)
 5. Keyword + vector index.
+   (Implemented as of Milestone 4 — `backend/src/app/retrieval/{lexical,vector}.py`.
+   PostgreSQL full-text search via a GIN expression index over
+   `to_tsvector('english', content)`, and pgvector exact cosine-distance
+   search over a nullable `chunks.embedding vector(384)` column, both scoped
+   by the same permission resolver used everywhere else. No approximate
+   (HNSW/IVFFlat) index — a deliberate trade-off, see `docs/architecture.md`.)
 6. Hybrid retrieval and reranking.
+   (Hybrid merge implemented as of Milestone 4 — `backend/src/app/retrieval/hybrid.py`,
+   Reciprocal Rank Fusion, k=60. Reranking beyond RRF — e.g. a cross-encoder —
+   remains deferred; Milestone 4 deliberately proved permission-safe
+   lexical+vector+hybrid retrieval first rather than adding a reranker on
+   spec.)
 7. Commitment extraction/normalization pipeline.
 8. Citation-safe generation service.
 9. Permission-safe query trace/audit storage.
+   (Partially addressed as of Milestone 4: `retrieval/service.py` returns an
+   in-memory `RetrievalTrace` that is safe by construction — every id in it
+   was already permission-scoped before the trace was built, with no
+   "filtered out N" counts anywhere. What's still deferred is *storage*: no
+   query-trace database table exists, and there is no generation-side trace
+   yet since there is no generation.)
 10. Golden-dataset evaluation runner.
+    (Partially addressed as of Milestone 4: `backend/src/app/retrieval/evaluate.py`
+    plus a 10-query fixture set (`backend/fixtures/retrieval_eval/`) compute
+    Recall@5/10, MRR, and a hard `unauthorized_candidate_count == 0` gate for
+    retrieval only. The full 50+ question suite across all six categories in
+    `docs/evaluation.md`, and any generation-side metrics, remain deferred.)
 
 Do not add a service merely because it appears on this list. Add the smallest component that solves the next validated requirement.

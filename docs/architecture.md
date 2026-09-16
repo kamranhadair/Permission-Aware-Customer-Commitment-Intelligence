@@ -99,6 +99,51 @@ real Zendesk/Gong/Slack API connectors and OAuth
     nothing syncs that membership from an external system)
 ```
 
+### What Milestone 4 actually implemented
+
+Milestone 4 (`backend/src/app/retrieval/`) is the next stage of the diagram at the top of this section — the first retrieval implementation, sitting downstream of everything Milestone 2/3 built:
+
+```
+IMPLEMENTED NOW (in addition to Milestone 2's and Milestone 3's lists)
+permission-scoped PostgreSQL full-text search (lexical channel)
+  → permission-scoped pgvector exact cosine-distance search (vector channel,
+    no approximate/ANN index — see below)
+  → both channels compute candidate scope via the same
+    get_permitted_document_ids resolver function Milestone 2 already uses
+    for every other permission-aware query — authorization is part of
+    candidate generation, not a filter applied after search
+  → Reciprocal Rank Fusion hybrid merge (k=60) of the two channels
+  → a single retrieve() service boundary, reusing get_visible_account for
+    account-slug scoping/404 parity
+  → a safe-by-construction in-memory RetrievalTrace (every id in it was
+    already permission-scoped before the trace was built — there is no
+    redaction step, and no "N results filtered out" count exists anywhere)
+  → one embedding provider (BAAI/bge-small-en-v1.5, local, no API key) plus
+    a deterministic fake provider used by the whole test suite
+  → an explicit, manually-run embedding backfill command
+    (python -m app.retrieval.embed_missing) — no trigger, no background
+    worker
+  → a single POST /search endpoint using the existing dev-only X-User-Id
+    identity mechanism
+  → a small (10-query) retrieval-quality golden set and evaluation script
+    reporting Recall@5/10, MRR, and a hard unauthorized-candidate-count == 0
+    gate
+
+STILL FUTURE
+reranking beyond the RRF hybrid merge, if still judged necessary
+  → LLM generation
+  → citations/claim grounding
+  → a persisted/audit query-trace store (the current trace is an in-memory
+    return value, not a database table)
+  → the full 50+ question golden evaluation suite covering generation
+    metrics, not just retrieval
+  → real Zendesk/Gong/Slack API connectors and OAuth
+  → a real enterprise identity provider
+  → group-membership sync from that provider
+```
+
+**The pgvector exact-vs-approximate trade-off, explained**: this milestone uses exact (brute-force) nearest-neighbor search — no HNSW/IVFFlat index exists on `chunks.embedding`. The reason is specifically about the security invariant, not just simplicity: an approximate index's own traversal logic decides which rows are even visited before any other predicate runs, so if a permission filter were layered on *after* that traversal, an approximate index could in principle cause an authorized result to be silently dropped (a recall problem) without ever being able to leak an unauthorized one — but proving that boundary precisely for a given ANN implementation is nontrivial, and this prototype avoids the question entirely by never introducing an approximate traversal step. In this design, the permission predicate and `embedding IS NOT NULL` are evaluated against literal rows in the `WHERE` clause before `ORDER BY`/`LIMIT` ranks anything, so there is no code path — approximate or otherwise — where an unauthorized row can become a candidate. The accepted trade-off is brute-force scan cost at scale; this is a deliberate prototype-scope decision, not a claim of production-scale performance.
+
 ## Frontend feature boundaries
 
 - `features/accounts` owns account-level presentation.

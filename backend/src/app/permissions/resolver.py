@@ -124,18 +124,27 @@ def _document_is_permitted(document_id_col: ColumnElement[int], user_ctx: UserCo
     )
 
 
-def get_permitted_document_ids(db: Session, user_ctx: UserContext, account_id: int) -> set[int]:
-    """Permitted document ids for one account, scoped to the caller's org.
+def get_permitted_document_ids(
+    db: Session, user_ctx: UserContext, account_id: int | None = None
+) -> set[int]:
+    """Permitted document ids, scoped to the caller's org and optionally to
+    one account.
 
     Starting the query at `accounts` and requiring
     `Account.org_id == user_ctx.org_id` is the tenant-isolation mechanism:
     a document belonging to another org's account is never reachable here,
-    regardless of what `account_id` is passed in.
+    regardless of what `account_id` is passed in. `account_id=None` scopes
+    to every account in the caller's org instead of one — used by retrieval
+    to search "all accounts visible to the user" without a second,
+    subtly-different ACL query.
     """
+    conditions = [Account.org_id == user_ctx.org_id]
+    if account_id is not None:
+        conditions.append(Account.id == account_id)
     stmt = (
         select(SourceDocument.id)
         .join(Account, Account.id == SourceDocument.account_id)
-        .where(Account.id == account_id, Account.org_id == user_ctx.org_id)
+        .where(*conditions)
         .where(_document_is_permitted(SourceDocument.id, user_ctx))
     )
     return set(db.scalars(stmt))
