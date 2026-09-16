@@ -14,6 +14,8 @@ def render(report: RunReport) -> str:
     lines: list[str] = []
     lines.append(f"=== Milestone 6 evaluation — mode={report.mode} — {report.timestamp} ===")
     lines.append("")
+    lines.extend(_overall_status_section(report))
+    lines.append("")
     lines.extend(_security_section(report))
     lines.append("")
     if report.mode == "retrieval":
@@ -33,8 +35,21 @@ def render(report: RunReport) -> str:
     return "\n".join(lines)
 
 
+def _overall_status_section(report: RunReport) -> list[str]:
+    return [
+        "--- Overall security status ---",
+        f"  automated_security_all_clear = {report.automated_security_all_clear}",
+        f"  manual_security_review_status = {report.manual_security_review_status}",
+        f"  overall_security_status = {report.overall_security_status.upper()}",
+    ]
+
+
 def _security_section(report: RunReport) -> list[str]:
     total_violations = sum(r.security_violation_count for r in report.case_results)
+    freshness_violations = sum(
+        1 for seq in report.freshness_results for step in seq["steps"]
+        if step["security_violations"] != 0 or not step["forbidden_absent"]
+    )
     lines = ["--- Automated structural security gates (hard, zero-tolerance) ---"]
     gate_totals: dict[str, int] = {}
     for r in report.case_results:
@@ -42,7 +57,12 @@ def _security_section(report: RunReport) -> list[str]:
             gate_totals[gate] = gate_totals.get(gate, 0) + count
     for gate, count in gate_totals.items():
         lines.append(f"  {gate} = {count}")
-    lines.append(f"  TOTAL VIOLATIONS = {total_violations}  ->  {'PASS' if total_violations == 0 else 'FAIL'}")
+    lines.append(f"  flat-case violations = {total_violations}")
+    lines.append(f"  freshness-sequence violations = {freshness_violations}")
+    lines.append(
+        f"  automated_security_all_clear -> {'PASS' if report.automated_security_all_clear else 'FAIL'} "
+        "(includes freshness sequences, not just flat cases)"
+    )
     return lines
 
 
@@ -98,7 +118,7 @@ def _generation_metrics_section(report: RunReport) -> list[str]:
 
 
 def _manual_review_section(report: RunReport) -> list[str]:
-    lines = ["--- Manual security review (human-adjudicated, hard gate) ---"]
+    lines = [f"--- Manual security review (human-adjudicated, hard gate) — status: {report.manual_security_review_status} ---"]
     pending = [r for r in report.case_results if r.manual_review]
     if not pending:
         lines.append("  (no cases required manual review in this run)")

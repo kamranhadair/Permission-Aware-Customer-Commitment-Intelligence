@@ -91,6 +91,30 @@ python -m app.evaluation.run --review-case-id ce-01 --review-gate hidden_conflic
 
 As of this milestone, the real-Gemini quota constraint (see below) meant zero designated cases actually received a live model response to review — this gate is `pending_review` for all of them, not `pass`, and the report says so explicitly rather than defaulting to a false "0 violations."
 
+**Reporting this honestly required more than one boolean.** A `RunReport` exposes three fields, not a single `security_all_clear`:
+
+```
+automated_security_all_clear: bool   — the 6 gates above, PLUS every
+                                        permission-freshness sequence step
+                                        (a failing sequence fails this on
+                                        its own, independent of every flat
+                                        case being clean)
+manual_security_review_status: "not_required" | "pending" | "passed" | "failed"
+                                      — "not_required" in --mode security/
+                                        retrieval, always (neither mode
+                                        ever asks a real model anything, so
+                                        neither may pretend to prove a
+                                        semantic model-output property)
+overall_security_status: "passed" | "pending_review" | "failed"
+                                      — "passed" only when both halves
+                                        above are clean; "pending_review"
+                                        when automated is clean but a
+                                        manual gate is still pending;
+                                        "failed" whenever either half fails
+```
+
+The CLI exit code follows `overall_security_status`: `0` for `passed`, `1` for `failed`, `2` for `pending_review` — a pending manual review must never be mistaken for a clean pass by a script checking the exit code alone.
+
 ## Permission-freshness cases
 
 Three sequences (`permission_freshness.json`), run only in `--mode security` (fast, no relevance to embedding quality — these are pure permission-transition checks):
@@ -115,13 +139,28 @@ One canonical entry point, `backend/src/app/evaluation/run.py` (`python -m app.e
 
 - `personas.py` — org/account/user/group seeding (all 6 personas).
 - `fixtures_loader.py` — ingests both Milestone 3's fixtures and the evaluation-only fixtures into one org, then hand-seeds the 5 authority-spanning commitments.
-- `stable_ids.py` — `{source, external_id}` ⇄ document/chunk id resolution, **org-scoped** (the runner is deliberately not idempotent — see "Known limitations" — so a stale account from an earlier run sharing the same slug must never be resolved by mistake).
+- `stable_ids.py` — `{source, external_id}` ⇄ document/chunk id resolution, **org-scoped** (each run seeds a fresh "Evaluation Org" — see "Session lifecycle and cleanup" below — so a stale account from an earlier or concurrent run sharing the same slug must never be resolved by mistake).
+- `dataset_validation.py` — proves the golden dataset's own privileged claims against the real seeded database rather than trusting them "by construction" (see "Dataset integrity validation" below).
+- `cleanup.py` — FK-safe deletion of exactly the rows one evaluation run seeded, scoped by org id (see "Session lifecycle and cleanup" below).
 - `security_gates.py` — the 6 automated gates, pure functions over ids.
 - `metrics.py` — Recall@k/MRR (document-level) and the deterministic generation-score fields.
 - `freshness.py` — mutate-query-restore sequencing for permission-freshness cases.
 - `schema.py` — pydantic validation of the golden dataset / freshness files at load time.
-- `runner.py` — the orchestrator: seed → ingest → embed → run every case in the requested mode → score → gate → (optionally) persist/resume.
-- `report.py` — renders a `RunReport` as the security-gate summary, per-category metrics, and a per-failure inspection block (question, persona, expected/retrieved/context stable evidence, status, security violations, failure category) — using **only stable ids and permission-safe fields**, never forbidden content, even though the evaluator privately knows what was supposed to be excluded. This report is evaluation/debug tooling; it is not, and must never become, the product's `/search` or `/answer` API trace.
+- `runner.py` — the orchestrator: seed → ingest → embed → validate the dataset → run every case in the requested mode → score → gate → (optionally) persist/resume → clean up.
+- `report.py` — renders a `RunReport` as the overall security status, per-category metrics, and a per-failure inspection block (question, persona, expected/retrieved/context stable evidence, status, security violations, failure category) — using **only stable ids and permission-safe fields**, never forbidden content, even though the evaluator privately knows what was supposed to be excluded. This report is evaluation/debug tooling; it is not, and must never become, the product's `/search` or `/answer` API trace.
+
+### Session lifecycle and cleanup
+
+`run()` takes an optional `db: Session` parameter with two distinct lifecycles, never conflated:
+
+- **Caller-supplied session** (`db=<pytest fixture session>`): used exactly as given, never replaced by a fresh `SessionLocal()`, and never closed by the runner — the caller owns rollback/isolation (a pytest fixture's SAVEPOINT teardown, for `backend/tests/test_evaluation_*.py`). No destructive cleanup runs in this path; running `cleanup_eval_orgs` against a caller's session would commit straight through whatever isolation boundary the caller was relying on.
+- **Runner-owned session** (`db=None`, the default — a standalone `python -m app.evaluation.run` invocation): the runner creates its own `SessionLocal()`, and in `finally` — whether the run succeeded, a case raised, or the dataset failed validation — attempts `cleanup_eval_orgs(session, [seed.org.id, seed.cross_org.id])`, deleting every row it seeded (in FK-safe dependency order, scoped by org id, never touching another org) before closing the session. If cleanup itself fails, that failure is printed to stderr as a clear warning and never replaces or masks the original evaluation error — an evaluation failure must always surface as itself, not as a secondary cleanup exception.
+
+This means a standalone run against `DATABASE_URL` no longer leaves scratch data behind — verified end to end (not just at the unit level) by running `--mode security` and `--mode retrieval` against a real dev database and confirming zero `"Evaluation Org%"` rows remain afterward, in both the success path and a deliberately-injected mid-run failure.
+
+### Dataset integrity validation
+
+Before any case is scored, `runner.run()` calls `dataset_validation.validate_golden_dataset()` and `validate_freshness_dataset()` against the real seeded database and raises `ValueError` (aborting the whole run, scoring nothing) if either finds a problem. This replaces an earlier "every `forbidden_evidence` is unauthorized by construction" assumption with an actual check: every `expected_evidence`/`forbidden_evidence` stable reference must resolve to exactly one real document in the case's account; every `forbidden_evidence` reference must actually be outside the named persona's permitted-document set at the seeded baseline (a golden file mislabeling a permitted document as forbidden is a dataset bug, not a security finding, and must fail loudly); and `expected_evidence`/`forbidden_evidence` must never overlap for the same case. `permission_freshness.json` sequences are validated only for resolution and disjointness, not the permitted/forbidden check — a sequence's whole point is that permission state changes *during* it, so that property is instead proven at runtime by the sequence's own pass/fail outcome.
 
 ### Three modes, never blended into one score
 
@@ -150,7 +189,9 @@ python -m app.evaluation.run --mode generation --case-id g3
 python -m app.evaluation.run --review-case-id ID --review-gate GATE --review-verdict pass|fail
 ```
 
-Each completed case's result is persisted to `backend/.eval-output/generation-latest.json` (gitignored) as it finishes, so a run interrupted by the free tier's daily cap can resume without re-spending already-completed calls (`--resume` skips any `case_id` already present). Persisted per case: `case_id`, timestamp, status, surviving claim summaries, resolved stable citation identities, automatic metrics, automatic security-gate results, and manual-review status. **Never persisted**: the API key, `.env` contents, the raw rendered system prompt, or any unauthorized content (only permitted/cited content is ever in an answer to begin with). No Redis/database job infrastructure was added — a local JSON file was sufficient.
+Each completed case's result is persisted to `backend/.eval-output/generation-latest.json` (gitignored) as it finishes, so a run interrupted by the free tier's daily cap can resume without re-spending already-completed calls. Persisted per case: `case_id`, timestamp, status, surviving claim summaries, resolved stable citation identities, automatic metrics, automatic security-gate results, and manual-review status. **Never persisted**: the API key, `.env` contents, the raw rendered system prompt, or any unauthorized content (only permitted/cited content is ever in an answer to begin with). No Redis/database job infrastructure was added — a local JSON file was sufficient.
+
+**`--resume` skips a case only if it reached a genuinely usable terminal outcome** (`answered`, `insufficient_evidence`, or `account_not_visible`) — `_resumable_completed_results()` in `runner.py`. A persisted `generation_failure` record is deliberately treated as *not* completed and is retried on the next `--resume`, because that status covers two situations that both deserve another attempt: a provider/network/quota error (the request never completed at all) and a schema-valid response where every claim failed grounding validation (the request completed but produced nothing usable). Neither should become a permanent gap `--resume` can never fill in. A case that *did* complete and is only waiting on a human verdict for `unauthorized_fact_emitted`/`hidden_conflict_leakage` is never re-sent to the provider — its persisted claims/citations are kept as-is, and only `--review-case-id` changes its `manual_review` field.
 
 ## Failure classification
 
@@ -164,7 +205,15 @@ citation_validation_failure | prompt_generation_failure | golden_data_problem
 ## Thresholds
 
 ```
-security gates (all 8)                 exactly zero violations — non-negotiable
+overall_security_status                must be "passed" — "pending_review" and
+                                        "failed" are both non-negotiable blockers,
+                                        never averaged or treated as a soft warning
+automated_security_all_clear           exactly zero violations across all 6 gates
+                                        AND every permission-freshness sequence step
+                                        — non-negotiable
+manual_security_review_status          must be "not_required" or "passed" — a
+                                        "pending" designated case blocks a claimed
+                                        pass just as hard as a "failed" one does
 permission/refusal correctness         100% (status_correct on permission_refusal
                                         cases and the account_not_visible outcome)
 citation validity (security mode)      100% (FakeAnswerGenerator is fully
@@ -176,27 +225,36 @@ Real retrieval/generation quality thresholds are deliberately **not** pre-commit
 
 ## Baseline results (this milestone)
 
-**`--mode security`** (2026-09-16, full 50-case dataset + all 3 freshness sequences): **0 security violations** across every gate; every freshness sequence passed (`status_ok`, `forbidden_absent`, `security_violations == 0` at every step); every case's `account_not_visible` expectation (the only outcome this mode can meaningfully check) was correct.
+Re-verified 2026-09-16 after the session-lifecycle/cleanup/security-status/dataset-validation correctness fixes below — the numbers are unchanged from the first pass, now backed by correct runner semantics (in particular, `overall_security_status` is computed from the fixed logic that includes freshness sequences, and both runs were confirmed to leave zero scratch rows in the database afterward via the new automatic cleanup, not manual intervention).
 
-**`--mode retrieval`** (2026-09-16, real `BAAI/bge-small-en-v1.5`, full dataset): **0 security violations**. Recall@5 = Recall@10 = 1.00 in every Recall-eligible category (`commitment_authority`, `conflicting_evidence`, `cross_doc_synthesis`, `direct_lookup`, `prompt_injection`, `temporal`); MRR 0.80–1.00. No retrieval bug was found. `insufficient_evidence` and `permission_refusal` report no Recall/MRR-eligible cases (all have `expected_evidence: []` — see "Retrieval metrics" above for why that's excluded, not zero).
+**`--mode security`** (full 50-case dataset + all 3 freshness sequences): `overall_security_status = PASSED`, `automated_security_all_clear = True`, `manual_security_review_status = not_required`. Every freshness sequence passed (`status_ok`, `forbidden_absent`, `security_violations == 0` at every step); every case's `account_not_visible` expectation (the only outcome this mode can meaningfully check) was correct; the golden/freshness datasets both passed `dataset_validation` with zero errors.
+
+**`--mode retrieval`** (real `BAAI/bge-small-en-v1.5`, full dataset): `overall_security_status = PASSED`. Recall@5 = Recall@10 = 1.00 in every Recall-eligible category (`commitment_authority`, `conflicting_evidence`, `cross_doc_synthesis`, `direct_lookup`, `prompt_injection`, `temporal`); MRR 0.80–1.00. No retrieval bug was found. `insufficient_evidence` and `permission_refusal` report no Recall/MRR-eligible cases (all have `expected_evidence: []` — see "Retrieval metrics" above for why that's excluded, not zero).
 
 **`--mode generation`** (2026-09-16, real Gemini `gemini-2.5-flash`): **blocked by the free tier's 20-requests/day quota**, which Milestone 5 had already exhausted earlier the same calendar day. One live call succeeded during this milestone's work (a direct end-to-end run through the real ingestion → retrieval → generation pipeline, not merely a synthetic single-chunk smoke test like Milestone 5's), producing a correctly-structured, correctly-grounded answer — reconfirming Milestone 5's provider integration now also holds through the full Milestone 6 pipeline. Every subsequent attempt (5 more cases, then 1 more after a 60s wait to confirm the limit was a daily cap and not transient) received an explicit `429 RESOURCE_EXHAUSTED` from the API naming `GenerateRequestsPerDayPerProjectPerModel-FreeTier, limit: 20` — this is quota, not a bug, and per this milestone's own design brief the architecture was **not** changed in response. Every failed attempt was correctly recorded as `generation_failure` with **zero security-gate violations** — the failure-handling path holds under a real (not simulated) provider error propagated through the full evaluation runner, which is new evidence beyond Milestone 5's own `503`/`429` smoke test. The real-Gemini baseline across the full 50-case dataset, and every `unauthorized_facts_emitted`/`hidden_conflict_leakage` manual review, remain an open follow-up for a fresh day's quota or a paid tier — resumable via `--mode generation --resume` without re-spending the one completed call.
 
 ### Bugs found and fixed during this milestone
 
-All bugs found were in the **new Milestone 6 evaluation infrastructure itself** (`app/evaluation/`) — none were found in the Milestone 2–5 product code (`permissions/resolver.py`, `retrieval/*`, `generation/*` were not modified in this milestone). Per the regression policy, an infrastructure-only bug found and fixed *before* it ever produced a misleading result does not require a separate product regression test; each is instead directly exercised by the passing `test_evaluation_*.py` suite that replaced it:
+All bugs found were in the **new Milestone 6 evaluation infrastructure itself** (`app/evaluation/`) — none were found in the Milestone 2–5 product code (`permissions/resolver.py`, `retrieval/*`, `generation/*` were not modified in this milestone). Per the regression policy, an infrastructure-only bug found and fixed *before* it ever produced a misleading result does not require a separate product regression test; each is instead directly exercised by the passing `test_evaluation_*.py` suite that replaced it.
 
-- `stable_ids.document_ids_for` originally resolved `{source, external_id}` by account slug alone, not scoped to the seeding run's own org — since the runner is deliberately not idempotent (a fresh "Evaluation Org" per invocation, matching the retired scripts' precedent), a stale account sharing the same slug from an earlier run could have been silently resolved instead. Fixed by adding an `org_id` parameter, scoped from the seed's own `EvalSeed.org.id` at every call site.
+**First pass**:
+- `stable_ids.document_ids_for` originally resolved `{source, external_id}` by account slug alone, not scoped to the seeding run's own org — a stale account sharing the same slug from an earlier run could have been silently resolved instead. Fixed by adding an `org_id` parameter, scoped from the seed's own `EvalSeed.org.id` at every call site.
 - The freshness sequences' `grant_group_membership` mutation assumed `GroupMembership` had a surrogate `id` primary key; it has a composite `(user_id, group_id)` key. Fixed to look up/delete by the composite key directly.
 - A first draft computed `status_actual` for `--mode security`/`retrieval` as `"answered" if result.hits else "insufficient_evidence"` — but retrieval has no relevance threshold, so any permitted content in the account always produces *some* hit, misreporting every permission-exclusion and no-evidence-exists case as a status failure. Fixed by recognizing that distinction is only ever determinable at the generation layer; non-generation modes now only check the `account_not_visible` outcome (see "Retrieval metrics" above).
 - `python -m app.evaluation.run --mode generation` initially failed with `GEMINI_API_KEY is not set` despite a correctly-configured `backend/.env` — `GeminiAnswerGenerator` reads `os.environ` directly, and nothing outside `conftest.py`'s test-only setup loads `.env` into the process environment for a normal CLI invocation. Fixed by adding the same `load_dotenv()` call `conftest.py` already uses to `app/evaluation/run.py`'s CLI entry point (evaluation-runner-scoped, not a change to `generation/provider.py`).
 
-No hardening changes were made to `retrieval/`, `generation/`, or `permissions/` — evaluation found no evidence any were needed. This is a "Commit 1 only" milestone (`test: add full golden evaluation suite`, no `fix:` commit) per this milestone's own regression policy: manufacturing a second commit would misrepresent a clean result as a found-and-fixed one.
+**Second pass (correctness review before the baseline was trusted)**:
+- The runner never actually cleaned up a standalone run's seeded "Evaluation Org" — every real `python -m app.evaluation.run` invocation left scratch rows in the database, requiring manual cleanup between runs. Fixed with `cleanup.py`'s `cleanup_eval_orgs()`, invoked from `run()`'s `finally` block for a runner-owned session only (never for a caller-supplied one, where the caller — a pytest fixture's SAVEPOINT rollback — already owns isolation); a cleanup failure is printed as a warning and never masks the original evaluation error. Verified end to end, not just at the unit level: a real standalone `--mode security` and `--mode retrieval` run against the dev database now leave zero `"Evaluation Org%"` rows afterward, including when a case is made to raise mid-run.
+- `security_all_clear` was computed from flat per-case `security_violation_count` totals only — a failing permission-freshness sequence, or a pending/failed manual-review gate, did not affect it at all. Replaced with three explicit fields (`automated_security_all_clear`, `manual_security_review_status`, `overall_security_status`) whose semantics are unambiguous and whose computation (`_compute_security_status`) is unit-tested against all four required scenarios (freshness violation fails automated; a pending manual gate yields `pending_review`; a failed reviewed gate yields `failed`; all-clear yields `passed`).
+- The runner trusted every golden case's `forbidden_evidence` as unauthorized "by construction," with no check against the real seeded database. Replaced with `dataset_validation.py`, run before any case is scored: every stable evidence reference must resolve to exactly one real document, every `forbidden_evidence` reference must actually be outside the named persona's permitted set at baseline, and `expected_evidence`/`forbidden_evidence` must never overlap. A malformed case now aborts the whole run with a `ValueError` naming the case, instead of silently scoring a bogus assertion.
+- `--resume` treated any persisted `case_id` as "done," including one that only reached `generation_failure` (a provider/network/quota error, or an all-claims-invalid response) — a case that never actually completed could never be retried. Fixed by filtering to only the terminal, usable statuses (`answered`, `insufficient_evidence`, `account_not_visible`); `generation_failure` is always retried on the next `--resume`, while a case merely pending manual review keeps its persisted result and is never re-sent to the provider.
+
+No hardening changes were made to `retrieval/`, `generation/`, or `permissions/` — evaluation found no evidence any were needed. This is a "Commit 1 only" milestone for product code (no `fix:` commit against `retrieval/`, `generation/`, or `permissions/`) per this milestone's own regression policy: manufacturing one would misrepresent a clean result as a found-and-fixed one. The evaluation harness itself did need a follow-up correctness commit — see git history — which is a different thing from tuning the product to pass the eval.
 
 ## Known limitations
 
 - **Two categories are honestly below their nominal target**: `cross_doc_synthesis` (4 of a nominal 10+) and `conflicting_evidence` (7 of a nominal 10+). The fixture set — even after the new evaluation-only evidence Milestone 6 added — does not support further genuinely-distinct cases in these categories without either padding (near-duplicate questions over the same evidence pair) or persona-only reuse stretched past the point of adding real coverage. Both are documented here rather than silently hit with an invented case.
 - **The real-Gemini baseline is incomplete** (1 of 50 cases got a live answer) — a quota constraint, not a design gap; see "Baseline results" above.
 - **The two manual-adjudication security gates are `pending_review`, not `pass`**, for every designated case, because no designated case received a live model response this milestone. A completed report must not claim these at zero until real reviews exist.
-- **The evaluation runner is not idempotent** — each invocation seeds a fresh "Evaluation Org" against `DATABASE_URL` (matching the retired Milestone 4/5 scripts' documented behavior) and does not clean up after itself. Run it against a disposable/dev database, not one you care about keeping tidy; periodic manual cleanup of `organizations` rows named `"Evaluation Org%"` is expected.
+- **The evaluation runner still seeds a fresh "Evaluation Org" per standalone invocation** (not idempotent in the sense of reusing prior data), but it now cleans up after itself automatically in `finally` (see "Session lifecycle and cleanup" above) — a standalone run against `DATABASE_URL` no longer requires manual cleanup between runs, whether it succeeds, a case raises, or dataset validation fails. The one remaining caveat: if the process itself is killed (not a Python exception — e.g. `SIGKILL`, a crashed machine) between seeding and the `finally` block, cleanup cannot run and manual cleanup of `organizations` rows named `"Evaluation Org%"` would be needed; this is inherent to any `finally`-based cleanup and was not otherwise observed.
 - **No production-readiness claim.** This milestone measures and, where evidence justified it, hardens the existing prototype; it does not change its scope, add new infrastructure, or claim the system is ready for real traffic.

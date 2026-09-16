@@ -67,10 +67,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(report.render(result))
 
-    if not result.security_all_clear:
+    # Three-way exit status, matching RunReport.overall_security_status:
+    # 0 = passed, 1 = failed (a real violation), 2 = pending_review (no
+    # violation found, but a required manual gate hasn't been adjudicated
+    # yet — this must never be conflated with a clean pass).
+    if result.overall_security_status == "failed":
         print()
-        print("SECURITY GATE FAILED: one or more automated structural gates reported a violation.")
+        print("SECURITY STATUS: FAILED — an automated gate or a reviewed manual gate reported a violation.")
         return 1
+    if result.overall_security_status == "pending_review":
+        print()
+        print("SECURITY STATUS: PENDING_REVIEW — automated gates are clean, but a required manual gate has not been reviewed yet.")
+        return 2
     return 0
 
 

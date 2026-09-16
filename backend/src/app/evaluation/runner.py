@@ -26,6 +26,7 @@ conflate fake-model architecture checks with real-model quality metrics):
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +36,8 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.evaluation import personas as personas_module
+from app.evaluation.cleanup import cleanup_eval_orgs
+from app.evaluation.dataset_validation import validate_freshness_dataset, validate_golden_dataset
 from app.evaluation.fixtures_loader import embed_all_chunks, ingest_all_fixtures, seed_commitments
 from app.evaluation.freshness import run_sequence
 from app.evaluation.metrics import GenerationScore, mrr, recall_at_k, score_generation
@@ -48,6 +51,32 @@ from app.generation.validation import render_answer, validate_and_filter_claims
 from app.permissions.resolver import UserContext, get_user_context, get_visible_account, get_visible_commitments
 from app.retrieval.embeddings import BgeEmbeddingProvider, EmbeddingProvider, FakeEmbeddingProvider
 from app.retrieval.service import retrieve
+
+# Terminal, usable outcomes — a case in one of these states actually
+# completed and (except account_not_visible, which needs no model call at
+# all) consumed a real provider call. "generation_failure" is deliberately
+# excluded: it covers both a provider/network/quota error (the request
+# never completed) and a schema-valid response where every claim failed
+# grounding validation — neither is a result `--resume` should treat as
+# done, since re-running is exactly how a quota-blocked case gets another
+# chance without the operator manually tracking which ids are missing.
+COMPLETED_STATUSES = {"answered", "insufficient_evidence", "account_not_visible"}
+
+
+def _resumable_completed_results(persisted_case_results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """`--resume`'s filter: only a persisted record whose `status_actual` is
+    in `COMPLETED_STATUSES` counts as done and gets skipped on the next run.
+    A record whose provider call never completed, or whose response was
+    schema-valid but fully ungrounded (`generation_failure` either way), is
+    excluded here — so it lands back in the "cases still to run" list and
+    is retried, rather than becoming a permanent gap `--resume` can never
+    fill in. A case that *did* complete and is merely waiting on manual
+    review keeps its persisted claims/citations and is never re-sent to the
+    provider."""
+    return {
+        r["case_id"]: r for r in persisted_case_results if r.get("status_actual") in COMPLETED_STATUSES
+    }
+
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent.parent
 FIXTURES_DIR = BACKEND_DIR / "fixtures" / "evaluation"
@@ -101,13 +130,34 @@ class CaseResult:
         return asdict(self)
 
 
+ManualReviewStatus = Literal["not_required", "pending", "passed", "failed"]
+OverallSecurityStatus = Literal["passed", "pending_review", "failed"]
+
+
 @dataclass
 class RunReport:
     mode: Mode
     timestamp: str
     case_results: list[CaseResult]
     freshness_results: list[dict[str, Any]]
-    security_all_clear: bool
+    # Mechanically provable from ids alone: ordinary-case structural gates
+    # (lexical/vector/hybrid/context/citation) AND permission-freshness
+    # sequence violations AND cross-org (account_not_visible) checks. A
+    # failing freshness sequence fails this on its own — it is not enough
+    # for every flat case to be clean.
+    automated_security_all_clear: bool
+    # Semantic gates (unauthorized_facts_emitted, hidden_conflict_leakage)
+    # that cannot be proven from citation ids alone — see security_gates.py's
+    # module docstring. "not_required" means no case in this run was
+    # designated for manual review (always true in security/retrieval mode,
+    # which must never pretend to prove a semantic model-output property no
+    # model was actually asked to produce).
+    manual_security_review_status: ManualReviewStatus
+    # "passed" only when automated_security_all_clear is True AND
+    # manual_security_review_status is "not_required" or "passed".
+    # "pending_review" when automated is clean but a manual gate is still
+    # pending. "failed" whenever either half fails — never averaged.
+    overall_security_status: OverallSecurityStatus
 
 
 def _stable_refs_to_doc_ids(db: Session, org_id: int, account_slug: str, refs) -> set[int]:
@@ -420,6 +470,52 @@ def _run_freshness_sequences(
     return results
 
 
+def _compute_security_status(
+    all_case_dicts: list[dict[str, Any]], freshness_results: list[dict[str, Any]]
+) -> tuple[bool, ManualReviewStatus, OverallSecurityStatus]:
+    """See RunReport's field docstrings for the exact semantics. Freshness
+    sequence violations count toward `automated_security_all_clear` — a
+    single failing sequence step (a security violation OR an unexpectedly-
+    present forbidden document) fails the whole automated check, it is not
+    enough for every flat case to independently be clean. Takes plain dicts
+    (matching both `CaseResult.to_dict()` and a persisted-JSON record's
+    shape) so a resumed run's on-disk history and this run's fresh results
+    are scored identically."""
+    automated_clear = all(d.get("security_violation_count", 0) == 0 for d in all_case_dicts)
+    for sequence in freshness_results:
+        for step in sequence["steps"]:
+            if step["security_violations"] != 0 or not step["forbidden_absent"]:
+                automated_clear = False
+
+    manual_gate_values: list[str] = []
+    for d in all_case_dicts:
+        manual_review = d.get("manual_review")
+        if not manual_review:
+            continue
+        for gate, value in manual_review.items():
+            if gate == "notes":
+                continue
+            manual_gate_values.append(value)
+
+    if not manual_gate_values:
+        manual_status: ManualReviewStatus = "not_required"
+    elif any(v == "fail" for v in manual_gate_values):
+        manual_status = "failed"
+    elif any(v == "pending_review" for v in manual_gate_values):
+        manual_status = "pending"
+    else:
+        manual_status = "passed"
+
+    if not automated_clear or manual_status == "failed":
+        overall: OverallSecurityStatus = "failed"
+    elif manual_status == "pending":
+        overall = "pending_review"
+    else:
+        overall = "passed"
+
+    return automated_clear, manual_status, overall
+
+
 def run(
     mode: Mode,
     limit: int | None = None,
@@ -452,15 +548,30 @@ def run(
     if resume and output_path.exists():
         with output_path.open() as f:
             previous = json.load(f)
-        previous_results = {r["case_id"]: r for r in previous.get("case_results", [])}
+        previous_results = _resumable_completed_results(previous.get("case_results", []))
         cases = [c for c in cases if c.id not in previous_results]
 
     owns_session = db is None
-    db = db if db is not None else SessionLocal()
+    session = db if db is not None else SessionLocal()
+    seed: personas_module.EvalSeed | None = None
+    case_results: list[CaseResult] = []
+    freshness_results: list[dict[str, Any]] = []
     try:
-        seed = personas_module.seed(db)
-        ingest_all_fixtures(db, seed.org.id)
-        seed_commitments(db, seed.accounts)
+        seed = personas_module.seed(session)
+        ingest_all_fixtures(session, seed.org.id)
+        seed_commitments(session, seed.accounts)
+
+        # Validate the golden dataset's own privileged claims against the
+        # real seeded database before trusting any of them "by
+        # construction" — see dataset_validation.py. Always validates the
+        # full dataset/freshness files, not just the cases this invocation
+        # happens to be running, since this is cheap (no embeddings/Gemini)
+        # and a malformed case should fail loudly the first time anyone
+        # notices, not only on the day someone happens to run it.
+        errors = validate_golden_dataset(session, seed, _load_dataset())
+        errors += validate_freshness_dataset(session, seed, _load_freshness())
+        if errors:
+            raise ValueError("Golden dataset validation failed:\n" + "\n".join(errors))
 
         if mode == "security":
             embedding_provider: EmbeddingProvider = FakeEmbeddingProvider()
@@ -469,38 +580,54 @@ def run(
             embedding_provider = BgeEmbeddingProvider()
             generator = GeminiAnswerGenerator() if mode == "generation" else FakeAnswerGenerator()
 
-        embed_all_chunks(db, embedding_provider)
+        embed_all_chunks(session, embedding_provider)
 
-        case_results: list[CaseResult] = []
         for case in cases:
-            user_ctx = get_user_context(db, seed.users[case.persona].id)
+            user_ctx = get_user_context(session, seed.users[case.persona].id)
             if mode in ("security", "retrieval"):
                 result = _score_retrieval_case(
-                    db, seed, user_ctx, embedding_provider, case, mode, compute_recall=(mode == "retrieval")
+                    session, seed, user_ctx, embedding_provider, case, mode, compute_recall=(mode == "retrieval")
                 )
             else:
-                result = _score_generation_case(db, seed, user_ctx, embedding_provider, generator, case, mode)
+                result = _score_generation_case(session, seed, user_ctx, embedding_provider, generator, case, mode)
             case_results.append(result)
 
             if mode == "generation":
                 _persist_progress(output_path, mode, case_results, previous_results)
 
-        freshness_results: list[dict[str, Any]] = []
         if mode == "security":
-            freshness_results = _run_freshness_sequences(db, seed, embedding_provider)
+            freshness_results = _run_freshness_sequences(session, seed, embedding_provider)
     finally:
         if owns_session:
-            db.close()
+            try:
+                # Clear any failed-statement state first — safe even on a
+                # clean run, since every write up to this point was already
+                # committed by personas.seed()/ingest_all_fixtures()/etc.,
+                # so this can only discard an incidental empty transaction,
+                # never real seeded data.
+                session.rollback()
+                if seed is not None:
+                    cleanup_eval_orgs(session, [seed.org.id, seed.cross_org.id])
+            except Exception as cleanup_exc:  # noqa: BLE001 — must never mask the original error
+                org_desc = f"org {seed.org.id}" if seed is not None else "a partially-seeded org"
+                print(
+                    f"WARNING: evaluation cleanup failed for {org_desc} "
+                    f"(rows may remain in the database): {cleanup_exc}",
+                    file=sys.stderr,
+                )
+            session.close()
 
-    all_results = list(previous_results.values()) + [r.to_dict() for r in case_results]
-    security_all_clear = all(r.get("security_violation_count", 0) == 0 for r in all_results)
+    all_case_dicts = list(previous_results.values()) + [r.to_dict() for r in case_results]
+    automated_clear, manual_status, overall_status = _compute_security_status(all_case_dicts, freshness_results)
 
     report = RunReport(
         mode=mode,
         timestamp=datetime.now(timezone.utc).isoformat(),
         case_results=case_results,
         freshness_results=freshness_results,
-        security_all_clear=security_all_clear,
+        automated_security_all_clear=automated_clear,
+        manual_security_review_status=manual_status,
+        overall_security_status=overall_status,
     )
 
     if mode == "generation":

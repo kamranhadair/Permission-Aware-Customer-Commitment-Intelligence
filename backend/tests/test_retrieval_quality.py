@@ -22,6 +22,7 @@ def test_golden_dataset_has_zero_unauthorized_candidates_under_real_embeddings(d
     from app.evaluation import runner
 
     report = runner.run(mode="retrieval", db=db)
-    assert report.security_all_clear, [
+    assert report.automated_security_all_clear, [
         (r.case_id, r.security) for r in report.case_results if r.security_violation_count > 0
     ]
+    assert report.overall_security_status == "passed"

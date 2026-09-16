@@ -15,9 +15,13 @@ from app.evaluation import runner
 def test_security_mode_full_dataset_all_clear(db):
     report = runner.run(mode="security", db=db)
 
-    assert report.security_all_clear, [
+    assert report.automated_security_all_clear, [
         (r.case_id, r.security) for r in report.case_results if r.security_violation_count > 0
     ]
+    assert report.manual_security_review_status == "not_required", (
+        "security mode must never pretend to prove the two semantic model-output gates"
+    )
+    assert report.overall_security_status == "passed"
     assert len(report.case_results) >= 50
 
     account_not_visible_failures = [
