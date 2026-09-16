@@ -59,12 +59,18 @@ Add these only when you are ready to build the real data plane:
    is deliberately excluded. What's still deferred is *storage*: no
    query-trace database table exists for either stage.)
 10. Golden-dataset evaluation runner.
-    (Partially addressed as of Milestone 4/5: `backend/src/app/retrieval/evaluate.py`
-    (10 retrieval queries) and `backend/src/app/generation/evaluate.py` (12
-    generation questions) compute Recall@5/10/MRR and citation-correctness/
-    refusal-correctness metrics respectively, both with a hard
-    unauthorized-candidate/citation gate. The full 50+ question suite across
-    all six categories in `docs/evaluation.md` remains deferred to
-    Milestone 6.)
+    (Implemented as of Milestone 6 — `backend/src/app/evaluation/`, a single
+    canonical `python -m app.evaluation.run` entry point retiring the
+    Milestone 4/5 `retrieval/evaluate.py` / `generation/evaluate.py`
+    scripts. A 50-case golden dataset plus 3 permission-freshness sequences
+    (`backend/fixtures/evaluation/`), three explicit modes (security/
+    retrieval/generation, never blended into one score), 6 automated
+    zero-tolerance security gates plus 2 human-adjudicated ones, and
+    quota-aware resume for the real-Gemini mode. See `docs/evaluation.md`
+    for the full dataset composition, metrics, gates, and baseline results.
+    What's still deferred: a completed real-Gemini baseline across the full
+    dataset (blocked by the free tier's daily quota, not a design gap) and
+    an LLM-as-judge or any other automated proxy for free-text claim/wording
+    quality — deliberately not built, matching Milestone 5's own reasoning.)
 
 Do not add a service merely because it appears on this list. Add the smallest component that solves the next validated requirement.

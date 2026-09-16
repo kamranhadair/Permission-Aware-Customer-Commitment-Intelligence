@@ -1,0 +1,25 @@
+{
+  "channels": [
+    {
+      "id": "C-INITECH-INTERNAL",
+      "name": "product-initech-internal",
+      "account_slug": "initech-ltd",
+      "sensitivity": "confidential",
+      "acl": {"users": [], "groups": ["product", "exec"]}
+    },
+    {
+      "id": "C-GLOBEX-UPDATE",
+      "name": "product-globex-update",
+      "account_slug": "globex-inc",
+      "sensitivity": "internal",
+      "acl": {"users": [], "groups": ["product"]}
+    },
+    {
+      "id": "C-INITECH-EXEC",
+      "name": "exec-initech-escalations",
+      "account_slug": "initech-ltd",
+      "sensitivity": "confidential",
+      "acl": {"users": [], "groups": ["exec"]}
+    }
+  ]
+}

@@ -181,15 +181,15 @@ bounded, safe-by-construction context assembly over retrieval hits + visible
     RetrievalTrace rather than replacing it, and deliberately excludes the
     raw rendered prompt
   → a 12-question generation-focused evaluation slice
-    (fixtures/generation_eval/) and a manual eval script mirroring
-    retrieval/evaluate.py's shape
+    (fixtures/generation_eval/, since superseded — see "What Milestone 6
+    actually implemented" below) and a manual eval script mirroring
+    retrieval/evaluate.py's shape (also since superseded)
 
 STILL FUTURE
 reranking beyond the RRF hybrid merge, if still judged necessary
   → a second LLM verification/entailment pass beyond citation-ID and
     provenance validation (deliberately deferred — see below)
   → a persisted/audit query-trace store (still an in-memory return value)
-  → the full 50+ question golden evaluation suite
   → real Zendesk/Gong/Slack API connectors and OAuth
   → a real enterprise identity provider
   → group-membership sync from that provider
@@ -200,6 +200,66 @@ reranking beyond the RRF hybrid merge, if still judged necessary
 **Why claim-level structured provenance instead of trusting citation-ID validity alone**: a claim can cite a real, valid evidence id and still not actually support what it asserts — citation-ID validation alone cannot catch a claim that cites commitment A's evidence while describing commitment B's authority. Rather than trying to infer this from free-text prose (fragile) or adding a second LLM entailment/verification call (doubling the architecture for a single milestone), the model itself is asked to emit `claim_type` and, for commitment claims, `commitment_context_id` as part of the same structured output — one generation call, and the provenance check becomes a deterministic set-membership comparison. Free-text claim *correctness* (does the sentence say the right thing) is not solved by this and is not automatically scored; see `docs/evaluation.md`.
 
 **Why no public `conflict_detected` field**: a boolean computed from "does any visible commitment have permitted conflicting evidence" would imply a stronger guarantee than the system can prove — raw retrieval could surface a contradiction between two chunks never linked through `commitment_evidence`, which such a flag would silently miss while still looking authoritative. Conflict is instead expressed only as an ordinary grounded claim, citing both a commitment's supporting and conflicting evidence together, worded as "based on the evidence available to you" rather than as an absolute claim.
+
+### What Milestone 6 actually implemented
+
+Milestone 6 (`backend/src/app/evaluation/`) does not add a new pipeline stage — it is the measurement layer over everything Milestone 2–5 built, plus the hardening that measurement justified:
+
+```
+IMPLEMENTED NOW
+a 50-case golden dataset (backend/fixtures/evaluation/golden_dataset.json)
+  across 8 categories, plus 3 permission-freshness sequences
+  (permission_freshness.json), using ONLY document-level stable identity
+  ({source, external_id}, never a raw chunk PK) — resolved at scoring time
+  by app/evaluation/stable_ids.py
+  → evaluation-only source fixtures (backend/fixtures/evaluation/
+    {support,calls,slack}/) ingested through the real Milestone 3 parsers,
+    kept structurally separate from Milestone 3's own load-bearing fixtures
+  → three new hand-seeded commitments (customer_expectation, product_approved,
+    contractual) whose supporting evidence text actually says what the
+    label claims — not a bare DB label with no grounding — completing
+    coverage of all five authority values alongside the two Milestone 5
+    already had (sales_unapproved, product_target)
+one canonical runner, `python -m app.evaluation.run`, replacing the
+  retired app.retrieval.evaluate / app.generation.evaluate scripts
+  → three explicit modes that are never blended into one score: security
+    (FakeEmbeddingProvider + FakeAnswerGenerator, full dataset + freshness
+    sequences, no network), retrieval (BgeEmbeddingProvider, real
+    Recall@5/10/MRR, no Gemini spend), generation (BgeEmbeddingProvider +
+    GeminiAnswerGenerator, quota-budgeted via --limit/--start-at/--case-id/
+    --resume, persisting non-sensitive per-case progress to the gitignored
+    backend/.eval-output/)
+  → six automated, zero-tolerance structural security gates (unauthorized
+    lexical/vector/hybrid candidates, unauthorized generation-context
+    chunks, unauthorized citations, cross-org leakage via the
+    account_not_visible outcome) plus two gates that are explicitly NOT
+    automated — unauthorized_facts_emitted and hidden_conflict_leakage
+    require a human verdict per designated case (conflicting_evidence and
+    prompt_injection categories), because neither can be proven from
+    citation ids alone and a keyword heuristic ("however"/"conflict"/...)
+    is not a security proof
+  → permission-freshness sequences that mutate a real GroupMembership/
+    DocumentUserAcl row mid-run and always restore it afterward
+    (app/evaluation/freshness.py), proven order-independent by
+    test_evaluation_freshness.py
+  → a privilege-isolation guarantee: golden-only fields (forbidden_evidence,
+    note, expected_conflict, ...) never reach GenerationContext or the
+    Gemini request — verified by test_evaluation_privilege_isolation.py,
+    not merely asserted
+
+STILL FUTURE
+the full real-Gemini baseline across all 50 cases (blocked by the Gemini
+  free tier's 20-requests/day cap on the same calendar day Milestone 5
+  already exhausted it — see docs/evaluation.md's baseline results, not a
+  design gap)
+an LLM-as-judge or any other automated proxy for claim-level factual
+  correctness or authority/conflict wording quality (deliberately not
+  built — see docs/evaluation.md)
+```
+
+**Why Recall@5/10/MRR are computed only for cases with a real `expected_evidence` set**: retrieval has no relevance threshold — `retrieve()` always ranks whatever permitted content exists in the queried account, even when none of it is actually relevant. For a permission-exclusion or no-evidence-exists case (`expected_evidence: []`), Recall@k's "1.0 iff nothing was returned" convention would score 0.0 by construction, every time, regardless of retrieval quality, because *something* permitted always comes back. Blending that structurally-guaranteed 0 into a category average would misreport a metric artifact as a quality finding, so those cases are excluded from the Recall/MRR average (not scored as failures) — see `docs/evaluation.md`.
+
+**Why security/retrieval mode cannot check the `answered` vs. `insufficient_evidence` distinction**: that judgment is made entirely at the generation layer (the model's own declaration, or the zero-retrieved-context short-circuit in `generation/service.py`) — retrieval alone has no way to distinguish "found the right thing" from "found the only thing available, which happens to be irrelevant." Both non-generation modes can only meaningfully check the `account_not_visible` outcome (retrieve() returning `None`); an `answered`/`insufficient_evidence` expectation is reported as not-applicable rather than a false failure.
 
 ## Frontend feature boundaries
 

@@ -20,3 +20,7 @@ backend/.pytest_cache/
 backend/.env
 backend/.env.*
 !backend/.env.example
+
+# Milestone 6 evaluation runner output — local-only resume/progress state,
+# never contains secrets or unauthorized content (see docs/evaluation.md).
+backend/.eval-output/

@@ -1,0 +1,22 @@
+{
+  "calls": [
+    {
+      "id": "CALL-3001",
+      "account_slug": "initech-ltd",
+      "title": "Initech kickoff call",
+      "transcript": "AE: Welcome aboard, let's cover expectations for the rollout.\n\nCustomer: Based on your public documentation, we expect SSO enforcement to be included in the standard package at no extra fee.\n\nAE: I hear you — I'll note that, but I can't confirm scope on this call; nothing here is approved yet.",
+      "occurred_at": "2026-06-01T10:00:00Z",
+      "sensitivity": "customer_shared",
+      "acl": {"users": [], "groups": ["account-management"]}
+    },
+    {
+      "id": "CALL-3002",
+      "account_slug": "initech-ltd",
+      "title": "Initech contract signing review",
+      "transcript": "AE: Let's walk through the signed MSA before rollout.\n\nCustomer: Section 3.1 says you're contractually obligated to enforce SSO for Initech by December 31.\n\nAE: Confirmed — that's a contractual commitment in the signed agreement, not just a target.",
+      "occurred_at": "2026-08-01T10:00:00Z",
+      "sensitivity": "customer_shared",
+      "acl": {"users": [], "groups": ["account-management"]}
+    }
+  ]
+}

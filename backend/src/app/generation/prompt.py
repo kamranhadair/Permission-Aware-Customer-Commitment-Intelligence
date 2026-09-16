@@ -6,8 +6,8 @@ tag-like text) cannot break out of its delimiter or forge a fake citation
 block. This is the deterministic, provider-independent half of the
 prompt-injection boundary; whether a real model actually *obeys* injected
 text is a claim only a live smoke test against the real provider can prove
-(see backend/src/app/generation/evaluate.py and CLAUDE.md's Milestone 5
-manual verification notes).
+(see `python -m app.evaluation.run --mode generation`'s prompt_injection
+category cases and docs/evaluation.md's Milestone 6 notes).
 """
 
 from __future__ import annotations

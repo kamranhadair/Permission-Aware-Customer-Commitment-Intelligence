@@ -1,0 +1,57 @@
+{
+  "_meta": {
+    "description": "Multi-step permission-freshness sequences (Milestone 6 design section 7/13). Each sequence runs against the shared evaluation seed, mutates one permission row, re-queries, then the runner restores the exact original state before the next sequence or case runs — see backend/src/app/evaluation/freshness.py. The restore step is computed automatically from the mutation (not authored here) so it can never drift out of sync.",
+    "mutation_actions": ["revoke_group_membership", "grant_group_membership", "revoke_document_acl"]
+  },
+  "sequences": [
+    {
+      "id": "pf-group-revoke-01",
+      "steps": [
+        {"kind": "query", "t": "T1", "persona": "bob", "account_slug": "globex-inc",
+         "query": "What is the internal Product status on the Globex rate limit request?",
+         "expected_status": "answered",
+         "expected_evidence": [
+           {"source": "support", "external_id": "TICK-1002"},
+           {"source": "slack", "external_id": "C-GLOBEX-INTERNAL:1722020000.0001"},
+           {"source": "slack", "external_id": "C-GLOBEX-UPDATE:1787220000.0000"}
+         ]},
+        {"kind": "mutate", "action": "revoke_group_membership", "persona": "bob", "group": "product"},
+        {"kind": "query", "t": "T2", "persona": "bob", "account_slug": "globex-inc",
+         "query": "What is the internal Product status on the Globex rate limit request?",
+         "expected_status": "account_not_visible",
+         "forbidden_evidence": [
+           {"source": "support", "external_id": "TICK-1002"},
+           {"source": "slack", "external_id": "C-GLOBEX-INTERNAL:1722020000.0001"},
+           {"source": "slack", "external_id": "C-GLOBEX-UPDATE:1787220000.0000"}
+         ]}
+      ]
+    },
+    {
+      "id": "pf-acl-revoke-01",
+      "steps": [
+        {"kind": "query", "t": "T1", "persona": "alice", "account_slug": "acme-corp",
+         "query": "What was the workaround noted on the SSO support ticket?",
+         "expected_status": "answered",
+         "expected_evidence": [{"source": "support", "external_id": "TICK-1001"}]},
+        {"kind": "mutate", "action": "revoke_document_acl", "persona": "alice", "account_slug": "acme-corp", "source": "support", "external_id": "TICK-1001"},
+        {"kind": "query", "t": "T2", "persona": "alice", "account_slug": "acme-corp",
+         "query": "What was the workaround noted on the SSO support ticket?",
+         "expected_status": "insufficient_evidence",
+         "forbidden_evidence": [{"source": "support", "external_id": "TICK-1001"}]}
+      ]
+    },
+    {
+      "id": "pf-group-grant-01",
+      "steps": [
+        {"kind": "query", "t": "T1", "persona": "erin", "account_slug": "acme-corp",
+         "query": "What did we tell Acme about the SSO issue during the QBR?",
+         "expected_status": "account_not_visible"},
+        {"kind": "mutate", "action": "grant_group_membership", "persona": "erin", "group": "account-management"},
+        {"kind": "query", "t": "T2", "persona": "erin", "account_slug": "acme-corp",
+         "query": "What did we tell Acme about the SSO issue during the QBR?",
+         "expected_status": "answered",
+         "expected_evidence": [{"source": "call", "external_id": "CALL-2001"}]}
+      ]
+    }
+  ]
+}

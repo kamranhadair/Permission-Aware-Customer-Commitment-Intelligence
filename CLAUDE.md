@@ -75,7 +75,7 @@ A retrieval layer now exists at `backend/src/app/retrieval/`, searching the chun
 - **API surface**: `POST /search` (`backend/src/app/routers/search.py`), body `{query, account_slug?}`, identity via the existing dev-only `X-User-Id` header (401 without it) — the client can never assert its own role/groups/org, matching every other endpoint.
 - **Result contract**: `RetrievalHit` carries only `chunk_id`, `document_id`, `account_id`, `source`, `title`, `content`, `occurred_at`, `lexical_rank`, `vector_rank`, `hybrid_score` — no ACL principals, no sensitivity label, no hidden candidate counts.
 - **Tests**: `backend/tests/test_retrieval_{lexical,vector,hybrid,service,migration,quality}.py` and `test_search_api.py` — adversarially constructed (e.g. a forbidden chunk that lexically outranks, or is mathematically closer to the query vector than, the permitted chunk must still never appear as a candidate), plus direct/group ACL grants, membership/ACL revocation freshness, cross-org rejection, account-scoped vs. all-accounts privacy, no-ACL-fields-in-response, and one full ingestion-fixture-to-retrieval end-to-end round trip.
-- **Retrieval-quality evaluation**: `backend/fixtures/retrieval_eval/golden_queries.json` (10 queries: exact lexical, paraphrase/semantic, source conflict, temporal/stale, permission exclusion, both direct-user and group ACL grants) plus `python -m app.retrieval.evaluate` (not part of `pytest`; requires the `embeddings` extra) computing Recall@5, Recall@10, MRR per category, and the hard security gate `unauthorized_candidate_count == 0`. Known gap: no query yet empirically demonstrates hybrid fusion being *necessary* against the real embedding model (RRF's combination logic is proven at the unit level in `test_retrieval_hybrid.py` with synthetic ranks, not yet by a real query where neither channel alone would surface the target chunk) — left as a candidate item for the eventual full golden dataset rather than added here to avoid an unverified/padded case.
+- **Retrieval-quality evaluation** (superseded by Milestone 6 — see below): originally `backend/fixtures/retrieval_eval/golden_queries.json` (10 queries) plus `python -m app.retrieval.evaluate`, computing Recall@5, Recall@10, MRR per category, and the hard security gate `unauthorized_candidate_count == 0`. Known gap at the time: no query yet empirically demonstrated hybrid fusion being *necessary* against the real embedding model (RRF's combination logic was proven at the unit level in `test_retrieval_hybrid.py` with synthetic ranks). Both the fixture file and the script were retired in Milestone 6 in favor of the unified `backend/fixtures/evaluation/golden_dataset.json` and `python -m app.evaluation.run --mode retrieval`.
 - Frontend untouched; still on mock data. No LLM generation, no citations, no reranking, no persisted trace storage.
 
 ## Milestone 5 — Grounded generation + citation-safe answers (complete)
@@ -94,8 +94,25 @@ A generation layer now exists at `backend/src/app/generation/`, turning permissi
 - **Safe generation trace**: extends (embeds) the existing `RetrievalTrace` rather than replacing it. Adds only permission-safe, already-established-safe fields: which `E*`/`C*` ids reached the model, the generator model name, generation status, claims emitted/dropped, and the (opaque, non-sensitive) invalid ids the model attempted. The raw rendered prompt is deliberately **not** included — it would be redundant with `citations` and adds an unaudited second copy of evidence text for no benefit. Nothing is persisted to a database (unchanged from Milestone 4's stance).
 - **Prompt/evidence separation**: system instructions live in the `system_instruction` parameter; retrieved content is wrapped in `<evidence>`/`<commitment>` tags in the user turn with every untrusted field angle-bracket-escaped, so retrieved text can never fabricate a closing tag or a fake citation block. The system prompt explicitly instructs that tagged content is data, never instructions. This delimiter-integrity mechanism is unit-tested directly (`tests/test_generation_prompt.py`); whether a live model actually *obeys* injected text is a claim only the manual smoke test can support (see below).
 - **Tests**: `backend/tests/test_generation_{context,validation,provider,prompt,service}.py` and `test_answer_api.py` — 56 new tests, all against `FakeAnswerGenerator`/`FakeEmbeddingProvider`, no network calls. 160/160 backend tests pass overall; `permissions/resolver.py` and `retrieval/*` were not modified. Covers: unauthorized chunks never entering context/citations, group/document ACL revocation freshness, cross-org isolation, invented/cross-commitment/conflicting-only citation rejection, the zero-context short-circuit, the all-claims-invalid → `GenerationFailure` path, the partial-valid-claims path, commitment visibility/hiding parity with Milestone 2, prompt-injection delimiter escaping, and API-level 401/404/502/no-ACL-fields.
-- **Generation evaluation slice**: `backend/fixtures/generation_eval/golden_questions.json` (12 questions covering lookup, authority distinction, conflicting evidence, temporal update, permission refusal, insufficient evidence) plus `python -m app.generation.evaluate` (manual, not part of `pytest`; requires the `embeddings` and `generation` extras and a real `GEMINI_API_KEY`). Automatically-measurable metrics are citation correctness/completeness, forbidden-evidence absence, and refusal correctness, plus the two hard security gates (`unauthorized_candidate_count == 0`, `unauthorized_citation_count == 0`). Authority/conflict "correctness" deliberately reduce to the same citation-set checks rather than free-text keyword matching, because `validate_and_filter_claims` already makes cross-commitment citation structurally impossible — see the script's own docstring. Claim-level factual correctness and wording quality are explicitly **not** automatically scored (printed for manual review) rather than approximated with keyword-matching theater.
-  - **Real-provider verification actually performed** (2026-09-16, against Gemini's free tier): a direct `GeminiAnswerGenerator` smoke test confirmed structured-output parsing and correct `GenerationFailure` wrapping of both a transient `503` and a `429` provider error. Two full runs of the 12-question eval slice together produced live, correct Gemini answers for 9 of 12 questions (the rest hit the free tier's 20-requests/day cap for `gemini-2.5-flash` and were correctly surfaced as failures, not fabricated) — across every successful call, both security gates held at zero. Observed correct behavior: sales-vs-approved authority distinction, product-target-vs-contractual distinction, a real conflicting-evidence claim citing both supporting and conflicting evidence, a permission-scoped variant of the same question correctly omitting the conflict, and correct `insufficient_evidence` abstention where no evidence existed at all. One citation-set mismatch was observed on the authority-distinction question (the model's answer was correct and grounded, but cited slightly different evidence than the golden fixture's narrower `expected_evidence` list anticipated) and one status mismatch was observed where the model answered instead of abstaining, using only permitted evidence with no fabrication — both are documented, anticipated fixture-precision gaps, not grounding or security defects. The dedicated live prompt-injection case (synthetic content only) and one live end-to-end HTTP round trip through `/answer` were prepared but not completed in this session because the free-tier daily quota was exhausted before they ran; this is an open follow-up for whoever next runs `python -m app.generation.evaluate` or the manual smoke test against a fresh day's quota or a paid tier.
+- **Generation evaluation slice** (superseded by Milestone 6 — see below): originally `backend/fixtures/generation_eval/golden_questions.json` (12 questions) plus `python -m app.generation.evaluate`. Automatically-measurable metrics were citation correctness/completeness, forbidden-evidence absence, and refusal correctness, plus the two hard security gates. Authority/conflict "correctness" deliberately reduced to the same citation-set checks rather than free-text keyword matching, because `validate_and_filter_claims` already makes cross-commitment citation structurally impossible — this design carried forward unchanged into Milestone 6's unified metrics. Claim-level factual correctness and wording quality were explicitly **not** automatically scored, also carried forward unchanged.
+  - **Real-provider verification actually performed** (2026-09-16, against Gemini's free tier): a direct `GeminiAnswerGenerator` smoke test confirmed structured-output parsing and correct `GenerationFailure` wrapping of both a transient `503` and a `429` provider error. Two full runs of the 12-question eval slice together produced live, correct Gemini answers for 9 of 12 questions (the rest hit the free tier's 20-requests/day cap for `gemini-2.5-flash` and were correctly surfaced as failures, not fabricated) — across every successful call, both security gates held at zero. Observed correct behavior: sales-vs-approved authority distinction, product-target-vs-contractual distinction, a real conflicting-evidence claim citing both supporting and conflicting evidence, a permission-scoped variant of the same question correctly omitting the conflict, and correct `insufficient_evidence` abstention where no evidence existed at all. One citation-set mismatch was observed on the authority-distinction question (the model's answer was correct and grounded, but cited slightly different evidence than the golden fixture's narrower `expected_evidence` list anticipated) and one status mismatch was observed where the model answered instead of abstaining, using only permitted evidence with no fabrication — both are documented, anticipated fixture-precision gaps, not grounding or security defects. The dedicated live prompt-injection case and one live end-to-end HTTP round trip through `/answer` were prepared but not completed in this session because the free-tier daily quota was exhausted before they ran; **Milestone 6 confirmed the same quota was still exhausted on the same calendar day** — see that section below. Both the fixture file and the script were retired in Milestone 6 in favor of `backend/fixtures/evaluation/golden_dataset.json` and `python -m app.evaluation.run --mode generation`.
+
+## Milestone 6 — Full golden evaluation + security hardening (complete)
+
+A measurement layer now exists at `backend/src/app/evaluation/`, over everything Milestones 2–5 built: a 50-case golden dataset plus 3 permission-freshness sequences, one canonical runner (`python -m app.evaluation.run`), retiring the Milestone 4/5 `retrieval/evaluate.py` / `generation/evaluate.py` scripts and their fixture slices. Purpose: measure the full permission-aware pipeline end to end, classify any real failure before proposing a fix, and fix only what evidence justified.
+
+- **Dataset**: `backend/fixtures/evaluation/golden_dataset.json` (50 cases across `direct_lookup` (8), `cross_doc_synthesis` (4, honestly below the nominal 10+ target — the fixture set does not support more genuinely distinct cases without padding), `conflicting_evidence` (7, same honest-count reasoning), `temporal` (8), `permission_refusal` (10), `commitment_authority` (5), `prompt_injection` (4), `insufficient_evidence` (4)) plus `permission_freshness.json` (3 mutate-query-restore sequences). Every case's evidence is a `{source, external_id}` stable reference — never a raw chunk PK — resolved at scoring time by `evaluation/stable_ids.py`, and matched at the document level (any permitted chunk of the named document satisfies a case), not the chunk level.
+- **New evaluation-only fixtures** (`backend/fixtures/evaluation/{support,calls,slack}/`), ingested through the real Milestone 3 parsers and kept structurally separate from Milestone 3's own load-bearing fixtures: a new `initech-ltd` account carrying a genuine customer_expectation → product_approved → contractual timeline, a Globex timeline reversal (`product_target` → delayed), an exec-only Slack channel (the first fixture content that actually distinguishes the `exec` group from `product`), a direct-user-only grant for a new `erin` persona, and four synthetic support tickets carrying prompt-injection payloads under `injection-test-co`.
+- **New personas**: `erin` (zero group membership — direct-user ACL grants only) and `frank` (a user in a *separate* organization, used only to prove cross-org isolation), alongside the existing `alice`/`bob`/`carol`/`dana`.
+- **Three new hand-seeded commitments** complete authority coverage to all five values (`customer_expectation`, `product_approved`, `contractual`, alongside Milestone 5's existing `sales_unapproved`/`product_target`) — each one's supporting evidence text was written to actually justify the label (e.g. the `contractual` commitment's evidence explicitly says "per the signed MSA... a contractual commitment, not just a target"), so authority-classification scoring is a genuine check against real evidence, never a tautological check against a label the harness itself inserted.
+- **Three explicit, never-blended modes**: `--mode security` (`FakeEmbeddingProvider`+`FakeAnswerGenerator`, no network, full dataset + all freshness sequences — this is also what `pytest` exercises, keeping the core suite network-free), `--mode retrieval` (real `BgeEmbeddingProvider`, no Gemini spend, real Recall@5/10/MRR), `--mode generation` (real `BgeEmbeddingProvider` + `GeminiAnswerGenerator`, quota-budgeted via `--limit`/`--start-at`/`--case-id`/`--resume`, persisting non-sensitive per-case progress to the gitignored `backend/.eval-output/`).
+- **6 automated, zero-tolerance security gates** (`unauthorized_lexical_candidates`, `unauthorized_vector_candidates`, `unauthorized_hybrid_candidates`, `unauthorized_generation_context_chunks`, `unauthorized_citations`, cross-org leakage via the `account_not_visible` outcome) plus **2 gates that are deliberately human-adjudicated, not automated** (`unauthorized_facts_emitted`, `hidden_conflict_leakage`) — neither can be proven from citation ids alone (a model could imply a forbidden fact without ever citing it), and a keyword heuristic is explicitly rejected as "not a security proof." Designated cases (`conflicting_evidence`/`prompt_injection` categories) are flagged `pending_review` until a human records a verdict via `--review-case-id`/`--review-gate`/`--review-verdict`.
+- **Permission-freshness sequences** mutate a real `GroupMembership`/`DocumentUserAcl` row mid-run and always restore it afterward regardless of outcome (`evaluation/freshness.py`) — proven order-independent by `test_evaluation_freshness.py` (two sequences run in either order produce identical final permission state).
+- **Privilege isolation, verified not assumed**: golden-only fields (`forbidden_evidence`, `note`, `expected_conflict`, ...) never reach `GenerationContext` or the Gemini request — `test_evaluation_privilege_isolation.py` proves this with a sentinel string that must never appear in what the generator actually receives.
+- **Tests**: `backend/tests/test_evaluation_{schema,metrics,security_gates,freshness,privilege_isolation,runner_fake_mode}.py`, 26 new tests, all network-free. `test_retrieval_quality.py` was rewritten to wrap `--mode retrieval` instead of the retired `retrieval/evaluate.py`. 186/186 backend tests pass overall; `permissions/resolver.py`, `retrieval/*`, and `generation/*` were **not modified**.
+- **Baseline results** (2026-09-16): `--mode security` — 0 violations across the full 50-case dataset and all 3 freshness sequences. `--mode retrieval` (real embeddings) — 0 violations, Recall@5 = Recall@10 = 1.00 in every Recall-eligible category, MRR 0.80–1.00; no retrieval bug found. `--mode generation` (real Gemini) — blocked by the free tier's 20-requests/day quota, which Milestone 5 had already exhausted earlier the same calendar day; one live call succeeded (the first real end-to-end ingestion→retrieval→generation pipeline run against a live model, not just a synthetic smoke test), and every subsequent attempt correctly surfaced as `generation_failure` with zero security violations, confirming the failure path holds under a real (not simulated) provider error. See `docs/evaluation.md` for full detail, including why Recall/MRR are only computed for cases with real `expected_evidence` (retrieval has no relevance threshold, so `expected_evidence: []` cases would score a structurally-guaranteed 0 regardless of quality) and why `--mode security`/`retrieval` cannot check the `answered` vs. `insufficient_evidence` distinction (that judgment only exists at the generation layer).
+- **This is a "Commit 1 only" milestone.** Every bug found during implementation was in the new Milestone 6 evaluation infrastructure itself (org-scoping in stable-id resolution, a composite-primary-key assumption in the freshness mutator, a flawed status heuristic in non-generation modes, missing `.env` loading in the CLI entry point) — none were found in the Milestone 2–5 product code. Manufacturing a `fix:` commit against product code with no evidence a fix was needed would misrepresent a clean result as a found-and-fixed one; see `docs/evaluation.md`'s "Bugs found and fixed" section for the full, honest list of what *was* found and where.
+- **Known limitations**: `cross_doc_synthesis` and `conflicting_evidence` are honestly below their nominal 10+ targets (documented, not padded); the real-Gemini baseline covers 1 of 50 cases (quota, not a design gap); the two manual-review security gates are `pending_review`, not `pass`, for every designated case since none received a live model response this milestone; the evaluation runner is not idempotent (matching the retired scripts' precedent — each run seeds a fresh scratch org, no cleanup). No production-readiness claim.
 
 ## Current architecture
 
@@ -162,14 +179,14 @@ The project intentionally avoids premature infrastructure. Currently **not imple
 - ACL synchronization *from external identity/document systems* (Milestone 3 added document-ACL synchronization *from re-ingested source data* on every re-ingestion — group *membership* sync from a real identity provider is still not built; see `future/README.md` item 4)
 - Reranking beyond the RRF hybrid merge (Milestone 4 added permission-aware lexical + vector retrieval with an RRF merge; Milestone 5 re-evaluated adding one for generation and deferred it again — a further reranking stage, e.g. a cross-encoder, is still not built; see `future/README.md` item 6)
 - Persisted/audit query-trace storage (Milestone 4's `RetrievalTrace` and Milestone 5's `GenerationTrace` are in-memory, safe-by-construction return values, not database tables; see `future/README.md` item 9)
-- The full 50+ question golden evaluation suite (Milestone 4 added a 10-query retrieval-only slice; Milestone 5 added a 12-question generation-focused slice; see `docs/evaluation.md` and `future/README.md` item 10)
 - A second LLM verification/entailment pass, multi-provider fallback routing, and generalized agent/tool-use orchestration (Milestone 5 deliberately used a single provider and a single generation call — see `docs/architecture.md`)
+- An LLM-as-judge or any other automated proxy for free-text claim correctness / authority-wording quality (Milestone 6 evaluated and rejected this — see `docs/evaluation.md`)
 - Background queues/workers
 - OpenSearch
 - OpenFGA
 - WorkOS
 
-pgvector, chunk embeddings, and PostgreSQL full-text search were added in Milestone 4 (`backend/src/app/retrieval/`) — these are no longer on the deferred list, but remain scoped exactly as documented there: one embedding model, exact (not approximate) vector search, no reranking. LLM generation, prompt construction, and claim-level citations were added in Milestone 5 (`backend/src/app/generation/`) — also no longer on the deferred list, scoped to one provider (Google Gemini), one generation call per request, and no persisted trace.
+pgvector, chunk embeddings, and PostgreSQL full-text search were added in Milestone 4 (`backend/src/app/retrieval/`) — these are no longer on the deferred list, but remain scoped exactly as documented there: one embedding model, exact (not approximate) vector search, no reranking. LLM generation, prompt construction, and claim-level citations were added in Milestone 5 (`backend/src/app/generation/`) — also no longer on the deferred list, scoped to one provider (Google Gemini), one generation call per request, and no persisted trace. The full 50+ question golden evaluation suite was added in Milestone 6 (`backend/src/app/evaluation/`) — also no longer on the deferred list, scoped exactly as documented there: 6 automated + 2 human-adjudicated security gates, three never-blended evaluation modes, no LLM-as-judge.
 
 ## Source-of-truth documents
 
@@ -224,13 +241,19 @@ python -m app.ingestion.cli slack   fixtures/slack               --org-id <id>
 pip install "torch>=2.2" --index-url https://download.pytorch.org/whl/cpu
 pip install -e ".[dev,embeddings]"      # only needed for the real (non-test) embedding provider
 python -m app.retrieval.embed_missing   # backfill chunks.embedding for any chunk where it's NULL
-python -m app.retrieval.evaluate        # small retrieval-quality eval (Recall@5/10, MRR, unauthorized-candidate gate)
 # POST /search  {"query": "...", "account_slug": "..."}  (account_slug optional — omit to search all visible accounts)
 
 # Generation (Milestone 5) — only needed for the real (non-test) Gemini provider:
 pip install -e ".[dev,generation]"
-python -m app.generation.evaluate       # small generation-quality eval; requires GEMINI_API_KEY + the embeddings extra
 # POST /answer  {"query": "...", "account_slug": "..."}  (account_slug required, unlike /search)
+
+# Evaluation (Milestone 6) — the single canonical evaluation entry point,
+# replacing the retired app.retrieval.evaluate / app.generation.evaluate:
+python -m app.evaluation.run --mode security              # fake models, no network — full dataset + freshness sequences
+python -m app.evaluation.run --mode retrieval              # real embeddings, no Gemini spend — real Recall@5/10/MRR
+python -m app.evaluation.run --mode generation --limit 15  # real Gemini, quota-budgeted
+python -m app.evaluation.run --mode generation --resume    # resume a quota-interrupted generation run
+python -m app.evaluation.run --review-case-id ID --review-gate unauthorized_fact_emitted --review-verdict pass
 ```
 
 ## Milestone status
@@ -462,6 +485,70 @@ Key decisions, for quick reference:
   one live end-to-end /answer HTTP round trip were prepared but not
   completed before quota ran out — an open follow-up, not a silently
   skipped step.
+```
+
+```
+Milestone 6 — Full golden evaluation + security hardening
+Status: COMPLETE
+
+Result:
+backend/src/app/evaluation/ now exists: a 50-case golden dataset plus 3
+permission-freshness sequences (backend/fixtures/evaluation/) run through
+one canonical entry point, python -m app.evaluation.run, retiring the
+Milestone 4/5 retrieval/evaluate.py and generation/evaluate.py scripts and
+their fixture slices. Three explicit, never-blended modes (security: fake
+models/no network/full dataset+freshness; retrieval: real embeddings/no
+Gemini spend/real Recall@5-10/MRR; generation: real Gemini/quota-budgeted/
+resumable). 6 automated zero-tolerance security gates plus 2 deliberately
+human-adjudicated ones (unauthorized_facts_emitted, hidden_conflict_leakage)
+that a keyword heuristic cannot honestly prove. 186/186 backend tests pass
+overall (26 new, all network-free); permissions/resolver.py, retrieval/*,
+and generation/* were not modified. No schema migration. Frontend untouched.
+
+Baseline (2026-09-16): --mode security — 0 violations, full dataset + all 3
+freshness sequences pass. --mode retrieval (real BAAI/bge-small-en-v1.5) —
+0 violations, Recall@5=Recall@10=1.00 in every Recall-eligible category,
+MRR 0.80-1.00; no retrieval bug found. --mode generation (real Gemini) —
+blocked by the free tier's 20-requests/day quota, already exhausted earlier
+the same calendar day by Milestone 5's own verification; one live call
+succeeded (the first real end-to-end pipeline run against a live model, not
+a synthetic smoke test), and every subsequent attempt correctly surfaced as
+generation_failure with zero security violations. This is a "Commit 1 only"
+milestone: every bug found was in the new evaluation infrastructure itself,
+none in the product code evaluation measured — see docs/evaluation.md's
+"Bugs found and fixed" section for the honest, itemized list rather than a
+manufactured fix: commit.
+
+Key decisions, for quick reference:
+- Document-level stable identity ({source, external_id}), never a raw
+  chunk PK, resolved at scoring time and org-scoped (the runner seeds a
+  fresh scratch org per invocation, matching the retired scripts'
+  documented not-idempotent precedent — org-scoping stable-id resolution
+  is what keeps that safe across repeated runs against the same database).
+- Recall@5/10/MRR are computed only for cases with a real (non-empty)
+  expected_evidence set: retrieval has no relevance threshold, so a
+  permission-exclusion/no-evidence-exists case would score a structurally
+  guaranteed 0 regardless of quality if included, misrepresenting a metric
+  artifact as a finding.
+- --mode security/retrieval can only meaningfully check the
+  account_not_visible outcome, never the answered/insufficient_evidence
+  distinction — that judgment exists only at the generation layer (the
+  model's own declaration or generation/service.py's zero-context
+  short-circuit).
+- Two categories (cross_doc_synthesis: 4, conflicting_evidence: 7) are
+  honestly below their nominal 10+ targets rather than padded with
+  near-duplicate questions — the fixture set, even after Milestone 6's new
+  evaluation-only evidence, does not support more genuinely distinct cases.
+- No LLM-as-judge: every invariant this project cares about (permission
+  safety, citation provenance, authority conflation) is already provable
+  structurally; free-text claim/wording quality stays a manual-review
+  field, never an approximated score.
+- Permission-freshness sequences always restore their mutation before the
+  run continues, regardless of pass/fail, proven order-independent by a
+  dedicated test rather than assumed from dataset ordering.
+- The real-Gemini baseline remains incomplete (quota, not a design gap)
+  and the architecture was explicitly not changed in response, per this
+  milestone's own instruction not to redesign around free-tier limits.
 ```
 
 ## Foreign agent configs detected

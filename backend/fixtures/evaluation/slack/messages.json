@@ -1,0 +1,22 @@
+{
+  "messages": [
+    {
+      "channel_id": "C-INITECH-INTERNAL",
+      "ts": "1782900000.0000",
+      "user": "bob@vendor.example",
+      "text": "Approved — SSO enforcement for Initech is now a confirmed Q4 commitment, signed off by the Product Lead. This supersedes the earlier informal target and is no longer exploratory."
+    },
+    {
+      "channel_id": "C-GLOBEX-UPDATE",
+      "ts": "1787220000.0000",
+      "user": "bob@vendor.example",
+      "text": "Update: after capacity review, the export rate limit increase originally targeted for Q4 is now delayed to Q1 next year. Do not communicate this delay to the customer yet."
+    },
+    {
+      "channel_id": "C-INITECH-EXEC",
+      "ts": "1783400000.0000",
+      "user": "carol@vendor.example",
+      "text": "Exec briefing: Initech is a strategic account this quarter — escalate any SSO delivery risk directly to the VP before it reaches the customer."
+    }
+  ]
+}
