@@ -38,21 +38,33 @@ Add these only when you are ready to build the real data plane:
    Reciprocal Rank Fusion, k=60. Reranking beyond RRF — e.g. a cross-encoder —
    remains deferred; Milestone 4 deliberately proved permission-safe
    lexical+vector+hybrid retrieval first rather than adding a reranker on
-   spec.)
+   spec, and Milestone 5 re-evaluated the question for generation and
+   deferred it again since the bounded context already sends the model
+   every retrieved chunk, not just the top-ranked one.)
 7. Commitment extraction/normalization pipeline.
 8. Citation-safe generation service.
+   (Implemented as of Milestone 5 — `backend/src/app/generation/`. Bounded
+   context assembly over permission-scoped retrieval hits and visible
+   commitments, structured claim-level citations with server-side
+   provenance validation, and a single Google Gemini provider behind a
+   tiny abstraction. What's still deferred: a reranker, a second LLM
+   verification/entailment pass, and multi-provider fallback — see
+   `docs/architecture.md`'s "What Milestone 5 actually implemented".)
 9. Permission-safe query trace/audit storage.
-   (Partially addressed as of Milestone 4: `retrieval/service.py` returns an
-   in-memory `RetrievalTrace` that is safe by construction — every id in it
-   was already permission-scoped before the trace was built, with no
-   "filtered out N" counts anywhere. What's still deferred is *storage*: no
-   query-trace database table exists, and there is no generation-side trace
-   yet since there is no generation.)
+   (Partially addressed as of Milestone 4/5: `retrieval/service.py` and
+   `generation/service.py` return in-memory `RetrievalTrace`/
+   `GenerationTrace` objects that are safe by construction — every id in
+   them was already permission-scoped before the trace was built, with no
+   "filtered out N" counts anywhere, and the raw rendered generation prompt
+   is deliberately excluded. What's still deferred is *storage*: no
+   query-trace database table exists for either stage.)
 10. Golden-dataset evaluation runner.
-    (Partially addressed as of Milestone 4: `backend/src/app/retrieval/evaluate.py`
-    plus a 10-query fixture set (`backend/fixtures/retrieval_eval/`) compute
-    Recall@5/10, MRR, and a hard `unauthorized_candidate_count == 0` gate for
-    retrieval only. The full 50+ question suite across all six categories in
-    `docs/evaluation.md`, and any generation-side metrics, remain deferred.)
+    (Partially addressed as of Milestone 4/5: `backend/src/app/retrieval/evaluate.py`
+    (10 retrieval queries) and `backend/src/app/generation/evaluate.py` (12
+    generation questions) compute Recall@5/10/MRR and citation-correctness/
+    refusal-correctness metrics respectively, both with a hard
+    unauthorized-candidate/citation gate. The full 50+ question suite across
+    all six categories in `docs/evaluation.md` remains deferred to
+    Milestone 6.)
 
 Do not add a service merely because it appears on this list. Add the smallest component that solves the next validated requirement.

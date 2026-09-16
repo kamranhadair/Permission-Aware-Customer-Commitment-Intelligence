@@ -78,6 +78,25 @@ A retrieval layer now exists at `backend/src/app/retrieval/`, searching the chun
 - **Retrieval-quality evaluation**: `backend/fixtures/retrieval_eval/golden_queries.json` (10 queries: exact lexical, paraphrase/semantic, source conflict, temporal/stale, permission exclusion, both direct-user and group ACL grants) plus `python -m app.retrieval.evaluate` (not part of `pytest`; requires the `embeddings` extra) computing Recall@5, Recall@10, MRR per category, and the hard security gate `unauthorized_candidate_count == 0`. Known gap: no query yet empirically demonstrates hybrid fusion being *necessary* against the real embedding model (RRF's combination logic is proven at the unit level in `test_retrieval_hybrid.py` with synthetic ranks, not yet by a real query where neither channel alone would surface the target chunk) — left as a candidate item for the eventual full golden dataset rather than added here to avoid an unverified/padded case.
 - Frontend untouched; still on mock data. No LLM generation, no citations, no reranking, no persisted trace storage.
 
+## Milestone 5 — Grounded generation + citation-safe answers (complete)
+
+A generation layer now exists at `backend/src/app/generation/`, turning permission-scoped Milestone 4 retrieval hits plus permission-visible Milestone 2 `Commitment` rows into a structured, claim-level-cited answer via a single `POST /answer` endpoint — with server-side citation/provenance validation and zero schema migrations.
+
+- **No reranker.** Milestone 4 deliberately stopped after RRF; Milestone 5 re-evaluated adding one and deferred it again — the bounded context (top 8 retrieval hits, all sent to the model at once, not just rank #1) already mitigates most of what a reranker would buy, and no concrete ordering-quality problem was observed. See `docs/architecture.md` for the full justification.
+- **Bounded, safe-by-construction context** (`generation/context.py`): retrieval hits are kept in hybrid-rank order (never reordered by recency); permitted commitment evidence not already present is appended afterward in a deterministic `occurred_at DESC, chunk_id ASC` order; a hard cap of 10 total evidence blocks (`MAX_EVIDENCE_CONTEXT`) is enforced without ever truncating the retrieval hits themselves; a hard cap of 10 commitment blocks (`MAX_COMMITMENT_CONTEXT_BLOCKS`) applies independently. A commitment block is included only if at least one of its supporting evidence chunks survived the evidence cap — a commitment is never handed to the model with zero evidence it could legally cite.
+- **Two citation id spaces**: `E1..En` (evidence, the only valid citation target) and `C1..Cn` (structured commitment context, internal-only — never a valid citation; a claim citing a `C*` id is rejected by the exact same path as an invented `E*` id).
+- **Provenance-checked commitment claims**: a `Claim` carries `claim_type` (`"evidence"` or `"commitment"`) and, for `"commitment"`, a `commitment_context_id`. Server-side validation (`generation/validation.py`) requires every cited id to belong to that specific commitment's own supporting/conflicting evidence, and requires at least one cited id to come from its *supporting* evidence — citing only conflicting evidence can never by itself assert a commitment's authority or status. This makes cross-commitment authority conflation structurally impossible, not merely prompted against.
+- **No public `conflict_detected` field.** A global boolean would imply stronger semantics than permitted evidence can prove (raw retrieval could surface a contradiction never linked through `commitment_evidence`). Conflict is expressed only as an ordinary grounded claim citing both a commitment's supporting and conflicting evidence together, worded as "based on the evidence available to you," never as an absolute claim that no conflict exists anywhere.
+- **Precise failure semantics**: `insufficient_evidence` (a 200) means either the context was empty (model never called) or the model itself explicitly declared it. A schema-valid `"answered"` result where every claim fails grounding validation is a *different* outcome — a `GenerationFailure`, surfaced as `502 Bad Gateway` — because it proves generation failed, not that evidence was insufficient. A provider/network error is the same `GenerationFailure` → `502` path. A partial case (some claims valid, some invalid) returns `200 answered` with only the valid claims; the invalid ones are dropped and recorded (as opaque, non-sensitive ids) in the trace.
+- **Structured output, not tool-simulated JSON**: one generation provider, **Google Gemini** (`google-genai`, model `gemini-2.5-flash`), using Gemini's native `response_mime_type="application/json"` + `response_schema=RawGeneratedAnswer` structured-output mode — the same Pydantic model is passed directly as the schema and used to validate the response, so the wire schema and the validation schema can never drift apart. Forced/structured output lowers malformed-output risk; it does not remove the need to validate, so every payload still goes through `parse_provider_payload` before being trusted. (The provider was chosen as Gemini per explicit instruction partway through the milestone; the original design discussion in this file's history referenced Anthropic before the swap — the tiny provider abstraction made the swap a `provider.py`-only change with zero test churn, since the whole test suite runs against `FakeAnswerGenerator`.)
+- **`POST /answer`** (`backend/src/app/routers/answer.py`): body `{query, account_slug}` — `account_slug` is **required**, unlike `/search`'s optional field, since every in-scope product question is account-scoped. Identity via the existing dev-only `X-User-Id` header. `404` for a nonexistent/cross-org/zero-permitted-document account (identical, indistinguishable, matching every other endpoint); `502` for a generation failure; `200` for `answered`/`insufficient_evidence`.
+- **Citation shape**: `citation_id, chunk_id, document_id, source, title, occurred_at, excerpt` — no ACL principals, no sensitivity, no hidden/filtered counts. `chunk_id`/`document_id` are kept public, matching `/search`'s existing `RetrievalHitOut` contract (not a new exposure).
+- **Safe generation trace**: extends (embeds) the existing `RetrievalTrace` rather than replacing it. Adds only permission-safe, already-established-safe fields: which `E*`/`C*` ids reached the model, the generator model name, generation status, claims emitted/dropped, and the (opaque, non-sensitive) invalid ids the model attempted. The raw rendered prompt is deliberately **not** included — it would be redundant with `citations` and adds an unaudited second copy of evidence text for no benefit. Nothing is persisted to a database (unchanged from Milestone 4's stance).
+- **Prompt/evidence separation**: system instructions live in the `system_instruction` parameter; retrieved content is wrapped in `<evidence>`/`<commitment>` tags in the user turn with every untrusted field angle-bracket-escaped, so retrieved text can never fabricate a closing tag or a fake citation block. The system prompt explicitly instructs that tagged content is data, never instructions. This delimiter-integrity mechanism is unit-tested directly (`tests/test_generation_prompt.py`); whether a live model actually *obeys* injected text is a claim only the manual smoke test can support (see below).
+- **Tests**: `backend/tests/test_generation_{context,validation,provider,prompt,service}.py` and `test_answer_api.py` — 56 new tests, all against `FakeAnswerGenerator`/`FakeEmbeddingProvider`, no network calls. 160/160 backend tests pass overall; `permissions/resolver.py` and `retrieval/*` were not modified. Covers: unauthorized chunks never entering context/citations, group/document ACL revocation freshness, cross-org isolation, invented/cross-commitment/conflicting-only citation rejection, the zero-context short-circuit, the all-claims-invalid → `GenerationFailure` path, the partial-valid-claims path, commitment visibility/hiding parity with Milestone 2, prompt-injection delimiter escaping, and API-level 401/404/502/no-ACL-fields.
+- **Generation evaluation slice**: `backend/fixtures/generation_eval/golden_questions.json` (12 questions covering lookup, authority distinction, conflicting evidence, temporal update, permission refusal, insufficient evidence) plus `python -m app.generation.evaluate` (manual, not part of `pytest`; requires the `embeddings` and `generation` extras and a real `GEMINI_API_KEY`). Automatically-measurable metrics are citation correctness/completeness, forbidden-evidence absence, and refusal correctness, plus the two hard security gates (`unauthorized_candidate_count == 0`, `unauthorized_citation_count == 0`). Authority/conflict "correctness" deliberately reduce to the same citation-set checks rather than free-text keyword matching, because `validate_and_filter_claims` already makes cross-commitment citation structurally impossible — see the script's own docstring. Claim-level factual correctness and wording quality are explicitly **not** automatically scored (printed for manual review) rather than approximated with keyword-matching theater.
+  - **Real-provider verification actually performed** (2026-09-16, against Gemini's free tier): a direct `GeminiAnswerGenerator` smoke test confirmed structured-output parsing and correct `GenerationFailure` wrapping of both a transient `503` and a `429` provider error. Two full runs of the 12-question eval slice together produced live, correct Gemini answers for 9 of 12 questions (the rest hit the free tier's 20-requests/day cap for `gemini-2.5-flash` and were correctly surfaced as failures, not fabricated) — across every successful call, both security gates held at zero. Observed correct behavior: sales-vs-approved authority distinction, product-target-vs-contractual distinction, a real conflicting-evidence claim citing both supporting and conflicting evidence, a permission-scoped variant of the same question correctly omitting the conflict, and correct `insufficient_evidence` abstention where no evidence existed at all. One citation-set mismatch was observed on the authority-distinction question (the model's answer was correct and grounded, but cited slightly different evidence than the golden fixture's narrower `expected_evidence` list anticipated) and one status mismatch was observed where the model answered instead of abstaining, using only permitted evidence with no fabrication — both are documented, anticipated fixture-precision gaps, not grounding or security defects. The dedicated live prompt-injection case (synthetic content only) and one live end-to-end HTTP round trip through `/answer` were prepared but not completed in this session because the free-tier daily quota was exhausted before they ran; this is an open follow-up for whoever next runs `python -m app.generation.evaluate` or the manual smoke test against a fresh day's quota or a paid tier.
+
 ## Current architecture
 
 ```
@@ -104,7 +123,7 @@ Note: `/` and `/accounts/[accountId]` currently always render as `currentUser` (
 
 ### Backend status and wiring the frontend later
 
-The backend now implements identity → permission resolver → ACL filter → permitted documents/chunks/commitments (Milestone 2), source ingestion into that same permission-aware schema (Milestone 3), and permission-aware lexical/vector/hybrid retrieval over ingested chunks (Milestone 4) — see `docs/architecture.md`'s "What Milestone 4 actually implemented" subsection. Reranking beyond RRF, LLM generation, and citations remain unimplemented, and the frontend is not connected to any of this yet.
+The backend now implements identity → permission resolver → ACL filter → permitted documents/chunks/commitments (Milestone 2), source ingestion into that same permission-aware schema (Milestone 3), permission-aware lexical/vector/hybrid retrieval over ingested chunks (Milestone 4), and grounded, claim-level-cited answer generation over that retrieval plus permission-visible commitments (Milestone 5) — see `docs/architecture.md`'s "What Milestone 5 actually implemented" subsection. Reranking beyond RRF remains unimplemented (deliberately, twice now), and the frontend is not connected to any of this yet.
 
 When frontend integration happens, prefer a small repository interface returning the existing `frontend/src/types/domain.ts` types rather than reshaping components around the backend's wire format. Note the backend's Pydantic response contracts already differ from `domain.ts` in a couple of deliberate ways: `Evidence.allowedUsers`/`allowedGroups` are not exposed over the API (ACL membership is server-side authorization data, not something a client should receive), and a commitment's evidence is returned embedded and pre-filtered (`supporting_evidence`/`conflicting_evidence` as full objects) rather than as `evidenceIds`/`conflictingEvidenceIds` arrays, since there is no generic evidence-by-id endpoint to resolve them against.
 
@@ -138,19 +157,19 @@ For every future milestone, follow this process:
 
 The project intentionally avoids premature infrastructure. Currently **not implemented** — do not add any of these without an explicitly approved milestone:
 
-- LLM integration (generation, prompt construction, citations)
 - Real Zendesk/Gong/Slack API connectors and OAuth (Milestone 3 added file-based ingestion for these three source *shapes* via local fixtures — connecting to the real APIs is still not built)
 - Real authentication
 - ACL synchronization *from external identity/document systems* (Milestone 3 added document-ACL synchronization *from re-ingested source data* on every re-ingestion — group *membership* sync from a real identity provider is still not built; see `future/README.md` item 4)
-- Reranking beyond the RRF hybrid merge (Milestone 4 added permission-aware lexical + vector retrieval with an RRF merge — a further reranking stage, e.g. a cross-encoder, is still not built; see `future/README.md` item 6)
-- Persisted/audit query-trace storage (Milestone 4's `RetrievalTrace` is an in-memory, safe-by-construction return value, not a database table; see `future/README.md` item 9)
-- The full 50+ question golden evaluation suite (Milestone 4 added a 10-query retrieval-only slice; see `docs/evaluation.md` and `future/README.md` item 10)
+- Reranking beyond the RRF hybrid merge (Milestone 4 added permission-aware lexical + vector retrieval with an RRF merge; Milestone 5 re-evaluated adding one for generation and deferred it again — a further reranking stage, e.g. a cross-encoder, is still not built; see `future/README.md` item 6)
+- Persisted/audit query-trace storage (Milestone 4's `RetrievalTrace` and Milestone 5's `GenerationTrace` are in-memory, safe-by-construction return values, not database tables; see `future/README.md` item 9)
+- The full 50+ question golden evaluation suite (Milestone 4 added a 10-query retrieval-only slice; Milestone 5 added a 12-question generation-focused slice; see `docs/evaluation.md` and `future/README.md` item 10)
+- A second LLM verification/entailment pass, multi-provider fallback routing, and generalized agent/tool-use orchestration (Milestone 5 deliberately used a single provider and a single generation call — see `docs/architecture.md`)
 - Background queues/workers
 - OpenSearch
 - OpenFGA
 - WorkOS
 
-pgvector, chunk embeddings, and PostgreSQL full-text search were added in Milestone 4 (`backend/src/app/retrieval/`) — these are no longer on the deferred list, but remain scoped exactly as documented there: one embedding model, exact (not approximate) vector search, no reranking.
+pgvector, chunk embeddings, and PostgreSQL full-text search were added in Milestone 4 (`backend/src/app/retrieval/`) — these are no longer on the deferred list, but remain scoped exactly as documented there: one embedding model, exact (not approximate) vector search, no reranking. LLM generation, prompt construction, and claim-level citations were added in Milestone 5 (`backend/src/app/generation/`) — also no longer on the deferred list, scoped to one provider (Google Gemini), one generation call per request, and no persisted trace.
 
 ## Source-of-truth documents
 
@@ -207,6 +226,11 @@ pip install -e ".[dev,embeddings]"      # only needed for the real (non-test) em
 python -m app.retrieval.embed_missing   # backfill chunks.embedding for any chunk where it's NULL
 python -m app.retrieval.evaluate        # small retrieval-quality eval (Recall@5/10, MRR, unauthorized-candidate gate)
 # POST /search  {"query": "...", "account_slug": "..."}  (account_slug optional — omit to search all visible accounts)
+
+# Generation (Milestone 5) — only needed for the real (non-test) Gemini provider:
+pip install -e ".[dev,generation]"
+python -m app.generation.evaluate       # small generation-quality eval; requires GEMINI_API_KEY + the embeddings extra
+# POST /answer  {"query": "...", "account_slug": "..."}  (account_slug required, unlike /search)
 ```
 
 ## Milestone status
@@ -370,6 +394,74 @@ Key decisions, for quick reference:
 - The retrieval trace is returned in-memory/over the API response only;
   no query-trace database table was added, matching the "smallest option
   that satisfies evaluation/debuggability" guidance for this milestone.
+```
+
+```
+Milestone 5 — Grounded generation + citation-safe answers
+Status: COMPLETE
+
+Result:
+backend/src/app/generation/ now exists: bounded, safe-by-construction
+context assembly over Milestone 4 retrieval hits and Milestone 2 permission-
+visible commitments; a two-id-space citation scheme (E* evidence, C*
+internal-only commitment context); server-side grounding validation that
+makes cross-commitment authority conflation and conflicting-only-evidence
+commitment claims structurally impossible, not merely prompted against; a
+single generation provider (Google Gemini, structured JSON output, no
+tool-call simulation needed); and a single new endpoint, POST /answer,
+reusing the existing dev-only X-User-Id identity mechanism. 160/160 backend
+tests pass overall (56 new), all against FakeAnswerGenerator/
+FakeEmbeddingProvider — no network calls in pytest. Neither
+permissions/resolver.py nor retrieval/* were modified. No schema migration.
+Frontend untouched; still on mock data.
+
+Design went through two review rounds before implementation: the first
+added conflict/temporal/context-bound corrections (relevance-order-
+preserving context, a global evidence cap, provenance-linked commitment
+blocks); the second added the claim_type/commitment_context_id structured-
+provenance mechanism, removed a global conflict_detected field in favor of
+letting conflict emerge as an ordinary grounded claim, and drew a hard line
+between "the model honestly found nothing" (insufficient_evidence, a 200)
+and "the model's answer failed grounding validation" (GenerationFailure, a
+502) — see prior conversation for the full rationale, not reproduced here
+since the code and tests are now the source of truth.
+
+Key decisions, for quick reference:
+- No reranker: the bounded context already sends the model every
+  supplied chunk (not just rank #1), muting a reranker's main benefit;
+  no concrete ordering-quality problem was observed to justify the added
+  dependency/complexity.
+- Provider: Google Gemini (`google-genai`, model gemini-2.5-flash),
+  chosen over the originally-scoped Anthropic provider per explicit
+  direction partway through the milestone. The tiny provider-abstraction
+  boundary meant this was a provider.py-only change with zero test
+  churn — the entire test suite runs against FakeAnswerGenerator and
+  never depended on which real provider was configured.
+- Citation validation drops individual invalid claims rather than
+  failing the whole answer; only a fully-ungrounded "answered" result
+  (zero surviving claims) becomes a GenerationFailure/502 — this is a
+  provider/grounding failure, deliberately never disguised as a
+  legitimate insufficient_evidence business outcome.
+- account_slug is required on POST /answer, unlike /search's optional
+  field — every in-scope product question is account-scoped, and
+  cross-account commitment aggregation is out of scope.
+- Authority/conflict wording is never left to the model to invent: an
+  authority word may only describe evidence backed by a [Cn] commitment
+  block carrying that authority from the database.
+- The full rendered prompt is excluded from the trace and the API
+  response entirely — redundant with citations, and excluding it avoids
+  an unaudited second copy of evidence text.
+- Real-provider verification was actually run against Gemini's free
+  tier (not merely designed): auth, structured-output parsing, and
+  GenerationFailure wrapping of both a 503 and a 429 provider error were
+  all confirmed live. Two runs of the 12-question generation-eval slice
+  produced live answers for 9 of 12 questions before the free tier's
+  20-requests/day cap was hit; both security gates
+  (unauthorized_candidate_count, unauthorized_citation_count) held at
+  zero across every successful call. The live prompt-injection case and
+  one live end-to-end /answer HTTP round trip were prepared but not
+  completed before quota ran out — an open follow-up, not a silently
+  skipped step.
 ```
 
 ## Foreign agent configs detected

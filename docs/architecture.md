@@ -129,7 +129,7 @@ permission-scoped PostgreSQL full-text search (lexical channel)
     reporting Recall@5/10, MRR, and a hard unauthorized-candidate-count == 0
     gate
 
-STILL FUTURE
+STILL FUTURE (unchanged by Milestone 4)
 reranking beyond the RRF hybrid merge, if still judged necessary
   → LLM generation
   → citations/claim grounding
@@ -143,6 +143,63 @@ reranking beyond the RRF hybrid merge, if still judged necessary
 ```
 
 **The pgvector exact-vs-approximate trade-off, explained**: this milestone uses exact (brute-force) nearest-neighbor search — no HNSW/IVFFlat index exists on `chunks.embedding`. The reason is specifically about the security invariant, not just simplicity: an approximate index's own traversal logic decides which rows are even visited before any other predicate runs, so if a permission filter were layered on *after* that traversal, an approximate index could in principle cause an authorized result to be silently dropped (a recall problem) without ever being able to leak an unauthorized one — but proving that boundary precisely for a given ANN implementation is nontrivial, and this prototype avoids the question entirely by never introducing an approximate traversal step. In this design, the permission predicate and `embedding IS NOT NULL` are evaluated against literal rows in the `WHERE` clause before `ORDER BY`/`LIMIT` ranks anything, so there is no code path — approximate or otherwise — where an unauthorized row can become a candidate. The accepted trade-off is brute-force scan cost at scale; this is a deliberate prototype-scope decision, not a claim of production-scale performance.
+
+### What Milestone 5 actually implemented
+
+Milestone 5 (`backend/src/app/generation/`) is the next stage of the diagram at the top of this section — grounded generation and citations, sitting downstream of everything Milestone 2/3/4 built:
+
+```
+IMPLEMENTED NOW (in addition to Milestone 2's, 3's, and 4's lists)
+bounded, safe-by-construction context assembly over retrieval hits + visible
+  commitments (retrieval hits kept in hybrid-rank order, commitment evidence
+  appended deterministically, hard caps on both evidence and commitment
+  block counts — backend/src/app/generation/context.py)
+  → a two-id-space citation scheme: E* (evidence, the only valid citation
+    target) and C* (structured commitment context, internal-only — never a
+    valid citation)
+  → server-side grounding validation (generation/validation.py) that makes
+    cross-commitment authority conflation, and asserting a commitment's
+    authority/status from conflicting-only evidence, structurally
+    impossible rather than merely prompted against
+  → one generation provider (Google Gemini, structured JSON output via
+    response_schema, no tool-call simulation) plus a deterministic fake
+    generator used by the entire test suite
+  → a single retrieve-then-generate service boundary
+    (generation/service.py:answer()), reusing retrieve() and
+    get_visible_commitments() unmodified — no new ACL query was written
+  → a precise failure taxonomy: insufficient_evidence (a legitimate 200,
+    either a deterministic zero-context short-circuit or the model's own
+    declaration) is kept structurally distinct from GenerationFailure (a
+    502) — the latter covers both provider/network errors and a
+    schema-valid "answered" result where every claim fails grounding
+    validation, since that proves generation failed, not that evidence was
+    insufficient
+  → a single new endpoint, POST /answer, reusing the existing dev-only
+    X-User-Id identity mechanism, with account_slug required (unlike
+    /search's optional field)
+  → a safe generation trace that extends (embeds) the existing
+    RetrievalTrace rather than replacing it, and deliberately excludes the
+    raw rendered prompt
+  → a 12-question generation-focused evaluation slice
+    (fixtures/generation_eval/) and a manual eval script mirroring
+    retrieval/evaluate.py's shape
+
+STILL FUTURE
+reranking beyond the RRF hybrid merge, if still judged necessary
+  → a second LLM verification/entailment pass beyond citation-ID and
+    provenance validation (deliberately deferred — see below)
+  → a persisted/audit query-trace store (still an in-memory return value)
+  → the full 50+ question golden evaluation suite
+  → real Zendesk/Gong/Slack API connectors and OAuth
+  → a real enterprise identity provider
+  → group-membership sync from that provider
+```
+
+**Why reranking stayed deferred for generation too**: Milestone 5's context bound sends the model every one of the (up to 8) retrieval hits at once, not just the top-ranked one — a reranker's main value, surfacing the single best passage, is largely already mitigated when the model sees the whole window and reasons across it. No query in the generation eval slice demonstrated the model getting confused by irrelevant chunks crowding out a relevant one within that window. This is a re-evaluation, not a rubber-stamp of Milestone 4's original decision — revisit if a future eval slice shows otherwise.
+
+**Why claim-level structured provenance instead of trusting citation-ID validity alone**: a claim can cite a real, valid evidence id and still not actually support what it asserts — citation-ID validation alone cannot catch a claim that cites commitment A's evidence while describing commitment B's authority. Rather than trying to infer this from free-text prose (fragile) or adding a second LLM entailment/verification call (doubling the architecture for a single milestone), the model itself is asked to emit `claim_type` and, for commitment claims, `commitment_context_id` as part of the same structured output — one generation call, and the provenance check becomes a deterministic set-membership comparison. Free-text claim *correctness* (does the sentence say the right thing) is not solved by this and is not automatically scored; see `docs/evaluation.md`.
+
+**Why no public `conflict_detected` field**: a boolean computed from "does any visible commitment have permitted conflicting evidence" would imply a stronger guarantee than the system can prove — raw retrieval could surface a contradiction between two chunks never linked through `commitment_evidence`, which such a flag would silently miss while still looking authoritative. Conflict is instead expressed only as an ordinary grounded claim, citing both a commitment's supporting and conflicting evidence together, worded as "based on the evidence available to you" rather than as an absolute claim.
 
 ## Frontend feature boundaries
 

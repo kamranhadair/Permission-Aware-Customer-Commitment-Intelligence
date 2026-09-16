@@ -1,0 +1,145 @@
+{
+  "queries": [
+    {
+      "id": "g1",
+      "category": "lookup",
+      "persona": "alice",
+      "account_slug": "acme-corp",
+      "query": "What did we tell Acme about the SSO issue?",
+      "expected_status": "answered",
+      "expected_evidence": [{"source": "call", "external_id": "CALL-2001"}],
+      "forbidden_evidence": []
+    },
+    {
+      "id": "g2",
+      "category": "lookup",
+      "persona": "bob",
+      "account_slug": "globex-inc",
+      "query": "What is the internal Product status on the Globex rate limit request?",
+      "expected_status": "answered",
+      "expected_evidence": [{"source": "slack", "external_id": "C-GLOBEX-INTERNAL:1722020000.0001"}],
+      "forbidden_evidence": []
+    },
+    {
+      "id": "g3",
+      "category": "authority_distinction",
+      "persona": "dana",
+      "account_slug": "acme-corp",
+      "query": "Has Product approved a November delivery date for the SSO fix?",
+      "expected_status": "answered",
+      "expected_authority": "sales_unapproved",
+      "expected_evidence": [{"source": "call", "external_id": "CALL-2001"}],
+      "forbidden_evidence": [],
+      "note": "The commitment's true authority is sales_unapproved, not product_approved -- citation correctness against this single commitment's evidence set doubles as the authority-conflation check, since validate_and_filter_claims makes citing a DIFFERENT commitment's evidence for this claim structurally impossible."
+    },
+    {
+      "id": "g4",
+      "category": "authority_distinction",
+      "persona": "bob",
+      "account_slug": "globex-inc",
+      "query": "Is the Globex rate limit increase a contractual commitment?",
+      "expected_status": "answered",
+      "expected_authority": "product_target",
+      "expected_evidence": [{"source": "slack", "external_id": "C-GLOBEX-INTERNAL:1722020000.0001"}],
+      "forbidden_evidence": []
+    },
+    {
+      "id": "g5",
+      "category": "conflicting_evidence",
+      "persona": "dana",
+      "account_slug": "acme-corp",
+      "query": "Are there conflicting statements about the November SSO date?",
+      "expected_status": "answered",
+      "expected_conflict": true,
+      "expected_evidence": [
+        {"source": "call", "external_id": "CALL-2001"},
+        {"source": "slack", "external_id": "C-ACME-INTERNAL:1722000000.0001"}
+      ],
+      "forbidden_evidence": []
+    },
+    {
+      "id": "g6",
+      "category": "permission_refusal",
+      "persona": "alice",
+      "account_slug": "acme-corp",
+      "query": "Are there conflicting statements about the November SSO date?",
+      "expected_status": "answered",
+      "expected_conflict": false,
+      "expected_evidence": [{"source": "call", "external_id": "CALL-2001"}],
+      "forbidden_evidence": [{"source": "slack", "external_id": "C-ACME-INTERNAL:1722000000.0001"}],
+      "note": "Same question as g5, but alice (account-management only) must never see or imply the product/exec-only conflicting Slack thread."
+    },
+    {
+      "id": "g7",
+      "category": "insufficient_evidence",
+      "persona": "bob",
+      "account_slug": "acme-corp",
+      "query": "Has Product approved a November delivery date for the SSO fix?",
+      "expected_status": "insufficient_evidence",
+      "expected_evidence": [],
+      "forbidden_evidence": [{"source": "call", "external_id": "CALL-2001"}],
+      "note": "bob (product only) has no permitted supporting evidence for the sales_unapproved commitment (CALL-2001 is account-management-only), so the commitment itself is hidden for bob -- manual review: the model may legitimately answer citing the Slack note as plain unlabeled evidence instead of abstaining outright; both are acceptable, non-fabricated outcomes."
+    },
+    {
+      "id": "g8",
+      "category": "permission_refusal",
+      "persona": "alice",
+      "account_slug": "globex-inc",
+      "query": "What is the internal Product plan for the Globex rate limit increase?",
+      "expected_status": "insufficient_evidence",
+      "expected_evidence": [],
+      "forbidden_evidence": [
+        {"source": "support", "external_id": "TICK-1002"},
+        {"source": "slack", "external_id": "C-GLOBEX-INTERNAL:1722020000.0001"}
+      ],
+      "note": "alice is account-management only; all product-only Globex evidence and the product_target commitment itself must stay invisible."
+    },
+    {
+      "id": "g9",
+      "category": "temporal_update",
+      "persona": "dana",
+      "account_slug": "acme-corp",
+      "query": "Is there any more recent evidence than the internal caution about communicating the November date?",
+      "expected_status": "answered",
+      "expected_evidence": [
+        {"source": "call", "external_id": "CALL-2001"},
+        {"source": "slack", "external_id": "C-ACME-INTERNAL:1722000000.0001"}
+      ],
+      "forbidden_evidence": [],
+      "note": "CALL-2001 (2026-08-06) postdates the Slack note (2024-07-26); manual review of whether the answer's prose actually surfaces the newer evidence as most current."
+    },
+    {
+      "id": "g10",
+      "category": "insufficient_evidence",
+      "persona": "carol",
+      "account_slug": "globex-inc",
+      "query": "Has legal signed a contract guaranteeing the Globex rate limit increase?",
+      "expected_status": "insufficient_evidence",
+      "expected_evidence": [],
+      "forbidden_evidence": [],
+      "note": "No contract evidence exists anywhere in the fixtures for any persona -- a pure no-evidence-exists case, not a permission case."
+    },
+    {
+      "id": "g11",
+      "category": "lookup",
+      "persona": "alice",
+      "account_slug": "acme-corp",
+      "query": "What did the SSO support ticket say the workaround was?",
+      "expected_status": "answered",
+      "expected_evidence": [{"source": "support", "external_id": "TICK-1001"}],
+      "forbidden_evidence": [],
+      "note": "TICK-1001 is a direct-user ACL grant to alice, not a group grant."
+    },
+    {
+      "id": "g12",
+      "category": "permission_refusal",
+      "persona": "bob",
+      "account_slug": "acme-corp",
+      "query": "What did the SSO support ticket say the workaround was?",
+      "expected_status": "insufficient_evidence",
+      "expected_evidence": [],
+      "forbidden_evidence": [{"source": "support", "external_id": "TICK-1001"}],
+      "note": "TICK-1001's ACL is alice-only (direct user grant); bob has no group or direct grant on it."
+    }
+  ]
+}

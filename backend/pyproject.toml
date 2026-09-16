@@ -22,6 +22,10 @@ dev = ["pytest>=8.0", "httpx>=0.27"]
 # FakeEmbeddingProvider and never imports sentence_transformers, so `dev`
 # alone is enough to run `pytest`.
 embeddings = ["sentence-transformers>=3.0"]
+# Only needed for the real (non-test) answer generator — app/generation/evaluate.py
+# and the live API when GeminiAnswerGenerator is actually invoked. The full
+# generation test suite uses FakeAnswerGenerator and never imports this package.
+generation = ["google-genai>=1.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
