@@ -248,10 +248,14 @@ one canonical runner, `python -m app.evaluation.run`, replacing the
     not merely asserted
 
 STILL FUTURE
-the full real-Gemini baseline across all 50 cases (blocked by the Gemini
-  free tier's 20-requests/day cap on the same calendar day Milestone 5
-  already exhausted it — see docs/evaluation.md's baseline results, not a
-  design gap)
+the full real-Gemini baseline across all 50 cases (6 of 50 reached a real
+  terminal outcome — 3 live model answers, all correct, plus 3 structural
+  account_not_visible completions — before the free tier's 20-requests/day
+  cap locked out the rest; confirmed via a direct API probe outside the
+  evaluation runner; not a design gap — see docs/evaluation.md's baseline
+  results); the live prompt-injection case and one live end-to-end
+  POST /answer round trip, both carried forward from Milestone 5, remain
+  untried for the same quota reason
 an LLM-as-judge or any other automated proxy for claim-level factual
   correctness or authority/conflict wording quality (deliberately not
   built — see docs/evaluation.md)
