@@ -9,24 +9,23 @@ field into the prompt would fail this test immediately.
 from __future__ import annotations
 
 from app.evaluation.personas import EvalSeed
-from app.evaluation.runner import _score_generation_case
+from app.evaluation.runner import _score_generation_case, _score_security_generation_case
 from app.evaluation.schema import GoldenCase, StableEvidenceRef
 from app.generation.provider import FakeAnswerGenerator
 from app.generation.types import GeneratedAnswer
 from app.permissions.resolver import get_user_context
 from app.retrieval.embeddings import FakeEmbeddingProvider
-from tests.factories import grant_group_acl, make_account, make_chunk, make_document, make_group, make_org, make_user
+from tests.factories import add_membership, grant_group_acl, make_account, make_chunk, make_document, make_group, make_org, make_user
 
 SENTINEL = "SENTINEL-PRIVILEGED-TEXT-DO-NOT-LEAK-93f1"
 
 
-def test_privileged_golden_fields_never_reach_generator_query_or_context(db):
+def _seed_case(db) -> tuple[EvalSeed, GoldenCase]:
     org = make_org(db, "Org")
     org2 = make_org(db, "Org2")
     account = make_account(db, org, "acct")
     group = make_group(db, org, "grp")
     user = make_user(db, org, "u@example.com")
-    from tests.factories import add_membership
 
     add_membership(db, user, group)
     doc = make_document(db, account, source="call", title="Doc title", sensitivity="internal")
@@ -38,7 +37,6 @@ def test_privileged_golden_fields_never_reach_generator_query_or_context(db):
     db.flush()
 
     seed = EvalSeed(org=org, cross_org=org2, accounts={"acct": account}, users={"u": user}, groups={"grp": group})
-
     case = GoldenCase(
         id="priv-01",
         category="permission_refusal",
@@ -49,18 +47,41 @@ def test_privileged_golden_fields_never_reach_generator_query_or_context(db):
         forbidden_evidence=[StableEvidenceRef(source="call", external_id=SENTINEL)],
         note=f"privileged evaluator note containing {SENTINEL}",
     )
+    return seed, case
 
-    generator = FakeAnswerGenerator(respond_with=GeneratedAnswer(status="insufficient_evidence", claims=[]))
-    user_ctx = get_user_context(db, user.id)
 
-    _score_generation_case(db, seed, user_ctx, FakeEmbeddingProvider(), generator, case, mode="generation")
-
+def _assert_no_leak(generator: FakeAnswerGenerator, case: GoldenCase) -> None:
     assert generator.last_query == case.query, "the generator must receive exactly the case's query, nothing appended"
     assert SENTINEL not in (generator.last_query or "")
-
     if generator.last_context is not None:
         for chunk in generator.last_context.evidence:
             assert SENTINEL not in chunk.content
             assert SENTINEL not in chunk.title
         for commitment in generator.last_context.commitments:
             assert SENTINEL not in commitment.statement
+
+
+def test_privileged_golden_fields_never_reach_generator_query_or_context(db):
+    """Real --mode generation path (_score_generation_case)."""
+    seed, case = _seed_case(db)
+    generator = FakeAnswerGenerator(respond_with=GeneratedAnswer(status="insufficient_evidence", claims=[]))
+    user_ctx = get_user_context(db, seed.users["u"].id)
+
+    _score_generation_case(db, seed, user_ctx, FakeEmbeddingProvider(), generator, case, mode="generation")
+
+    _assert_no_leak(generator, case)
+
+
+def test_privileged_golden_fields_never_reach_security_mode_generator(db):
+    """--mode security's generation-side structural check
+    (_score_security_generation_case) — a separate code path added when
+    security mode started exercising the real generation pipeline, so it
+    gets its own regression here rather than assuming the guarantee above
+    covers it."""
+    seed, case = _seed_case(db)
+    generator = FakeAnswerGenerator(respond_with=GeneratedAnswer(status="insufficient_evidence", claims=[]))
+    user_ctx = get_user_context(db, seed.users["u"].id)
+
+    _score_security_generation_case(db, seed, user_ctx, FakeEmbeddingProvider(), generator, case, mode="security")
+
+    _assert_no_leak(generator, case)

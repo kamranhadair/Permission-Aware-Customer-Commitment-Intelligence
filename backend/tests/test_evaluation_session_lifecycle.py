@@ -51,7 +51,10 @@ def test_owned_session_cleans_up_and_reraises_when_a_case_raises(db, monkeypatch
     def _boom(*args, **kwargs):
         raise RuntimeError("simulated scoring failure")
 
-    monkeypatch.setattr(runner, "_score_retrieval_case", _boom)
+    # dl-01 is a generation-capable (non retrieval_only) case, so security
+    # mode dispatches it to _score_security_generation_case, not
+    # _score_retrieval_case.
+    monkeypatch.setattr(runner, "_score_security_generation_case", _boom)
 
     with pytest.raises(RuntimeError, match="simulated scoring failure"):
         runner.run(mode="security", case_id="dl-01")  # no db= -> owns_session=True, real SessionLocal()

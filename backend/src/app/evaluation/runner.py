@@ -7,12 +7,20 @@ dataset, three explicit modes, security gates, and quota-aware resume.
 Three modes, deliberately kept apart (Milestone 6 design section 2 — do not
 conflate fake-model architecture checks with real-model quality metrics):
 
-- security:   FakeEmbeddingProvider + FakeAnswerGenerator, no network. Runs
-              every case AND every permission-freshness sequence. Checks the
-              automated structural security gates and permission-exclusion
-              correctness. Never reports Recall/MRR — a fake embedding
-              provider is semantically meaningless, and reporting retrieval-
-              quality numbers computed from it as "quality" would be a lie.
+- security:   FakeEmbeddingProvider + a deterministic, cooperative
+              FakeAnswerGenerator (security_mode_fake_answer), no network.
+              Runs every case AND every permission-freshness sequence. For
+              a retrieval_only case, only the retrieval structural path
+              runs; for every other case, the real Milestone 5 generation
+              path (context construction, citation/provenance validation)
+              also runs, so an unauthorized chunk/commitment-evidence/
+              citation is proven to never reach GenerationContext or
+              survive validation — not just that retrieval alone stays
+              permission-scoped. Never reports Recall/MRR or any answer-
+              quality metric — a fake embedding provider and a
+              non-reasoning fake generator are both semantically
+              meaningless, and reporting quality numbers computed from
+              either as "quality" would be a lie.
 - retrieval:  BgeEmbeddingProvider, no generator call at all (no Gemini
               spend). Full-dataset real Recall@5/10/MRR plus the retrieval-
               scoped security gates.
@@ -47,6 +55,7 @@ from app.evaluation.stable_ids import DocumentIdentity, document_ids_for
 from app.generation.context import build_context
 from app.generation.errors import GenerationFailure
 from app.generation.provider import AnswerGenerator, FakeAnswerGenerator, GeminiAnswerGenerator
+from app.generation.types import Claim, GeneratedAnswer, GenerationContext
 from app.generation.validation import render_answer, validate_and_filter_claims
 from app.permissions.resolver import UserContext, get_user_context, get_visible_account, get_visible_commitments
 from app.retrieval.embeddings import BgeEmbeddingProvider, EmbeddingProvider, FakeEmbeddingProvider
@@ -94,6 +103,50 @@ MANUAL_REVIEW_CATEGORIES = {"conflicting_evidence", "prompt_injection"}
 RESERVED_AUTHORITY_WORDS = (
     "customer_expectation", "sales_unapproved", "product_target", "product_approved", "contractual",
 )
+
+
+def security_mode_fake_answer(query: str, context: GenerationContext) -> GeneratedAnswer:
+    """The deterministic, cooperative fake generation used ONLY by
+    `--mode security`, so that context construction, citation/provenance
+    validation, and generation-context security-gate collection actually
+    execute for every generation-capable case — not to simulate realistic
+    answer quality (that is real-`--mode generation`'s job).
+
+    It cites only ids it was actually given: one `evidence`-typed claim
+    citing every `E*` id in `context.evidence` (if any), plus one
+    `commitment`-typed claim per `C*` block citing that block's own
+    supporting (+conflicting, if present) ids — so
+    `validate_and_filter_claims`'s real cross-commitment-provenance branch
+    runs on every commitment case, not just its schema-valid path. It never
+    invents an id outside what `context` supplied, so every claim it
+    produces is expected to survive validation; a case where one doesn't
+    (surfacing as `generation_failure`) means something is architecturally
+    broken in context/validation wiring, not that the "model" refused.
+    """
+    claims: list[Claim] = []
+    if context.evidence:
+        claims.append(
+            Claim(
+                text="[security-mode structural check] evidence claim",
+                citation_ids=[chunk.citation_id for chunk in context.evidence],
+                claim_type="evidence",
+            )
+        )
+    for commitment in context.commitments:
+        cited_ids = list(commitment.supporting_citation_ids) + list(commitment.conflicting_citation_ids)
+        if not cited_ids:
+            continue
+        claims.append(
+            Claim(
+                text="[security-mode structural check] commitment claim",
+                citation_ids=cited_ids,
+                claim_type="commitment",
+                commitment_context_id=commitment.citation_id,
+            )
+        )
+    if not claims:
+        return GeneratedAnswer(status="insufficient_evidence", claims=[])
+    return GeneratedAnswer(status="answered", claims=claims)
 
 
 def _load_dataset() -> GoldenDataset:
@@ -253,12 +306,22 @@ def _score_retrieval_case(
 
 
 def _non_generation_status_ok(expected_status: str, acceptable_statuses: set[str], status_actual: str) -> bool:
-    """security/retrieval modes can only ever observe two outcomes:
-    'account_not_visible' (retrieve() returned None) or 'retrieved' (it
-    didn't). Only an 'account_not_visible' expectation is meaningfully
-    checkable here; an 'answered'/'insufficient_evidence' expectation is
-    reported as satisfied (not a failure) because this mode structurally
-    cannot evaluate it — see the comment in `_score_retrieval_case`."""
+    """security/retrieval modes can only ever observe a handful of
+    outcomes: 'account_not_visible' (retrieve() returned None), 'retrieved'
+    (plain retrieval-only path), or (security mode's generation-capable
+    cases) 'answered'/'insufficient_evidence'/'generation_failure' from the
+    deterministic, cooperative `security_mode_fake_answer`. Only
+    'account_not_visible' is meaningfully checkable against the golden
+    dataset's expectation here — an 'answered'/'insufficient_evidence'
+    expectation is reported as satisfied (not a failure) because neither
+    mode can evaluate real answer-quality correctness (see the comment in
+    `_score_retrieval_case`). 'generation_failure' is the one exception:
+    the cooperative fake never invents an id outside what it was given, so
+    it should never legitimately fail validation — if it does, that is a
+    genuine structural problem (not a "model" refusing), and is always
+    reported as a failure regardless of what the case expected."""
+    if status_actual == "generation_failure":
+        return False
     if "account_not_visible" in acceptable_statuses or expected_status == "account_not_visible":
         return status_actual == "account_not_visible"
     return True
@@ -319,35 +382,27 @@ def _run_generation_case_with_visibility(
     return generated.claims, context, valid_claims, retrieval_result, "answered"
 
 
-def _score_generation_case(
+def _generation_structural_gates(
     db: Session,
-    seed: personas_module.EvalSeed,
-    user_ctx: UserContext,
-    embedding_provider: EmbeddingProvider,
-    generator: AnswerGenerator,
-    case: GoldenCase,
-    mode: Mode,
-) -> CaseResult:
-    from app.permissions.resolver import get_permitted_document_ids
-
-    permitted_all = get_permitted_document_ids(db, user_ctx, None)
-    _raw_claims, context, valid_claims, retrieval_result, status_actual = _run_generation_case_with_visibility(
-        db, user_ctx, embedding_provider, generator, case.query, case.account_slug
-    )
-
+    permitted_all: set[int],
+    retrieval_result,
+    context,
+    valid_claims,
+) -> tuple[SecurityGateReport, list[int], list[int]]:
+    """The retrieval-trace gates (lexical/vector/hybrid) plus the
+    generation-context/citation gates for one generation-capable case —
+    shared by real `--mode generation` (which additionally scores answer
+    quality on top of this) and `--mode security`'s structural-only check
+    (which does not). Returns (merged gate report, context document ids,
+    cited document ids)."""
     gate_reports = []
-    note_flags: list[str] = []
-    manual_review: dict[str, str] | None = None
-    generation_payload: dict[str, Any] | None = None
-
     if retrieval_result is not None:
         gate_reports.append(check_retrieval_gates(db, permitted_all, retrieval_result.trace))
 
-    account = seed.accounts.get(case.account_slug)
-
+    context_doc_ids: list[int] = []
+    cited_doc_ids: list[int] = []
     if context is not None:
         context_doc_ids = [c.document_id for c in context.evidence]
-        cited_doc_ids: list[int] = []
         if valid_claims:
             by_citation = {c.citation_id: c for c in context.evidence}
             seen: set[int] = set()
@@ -359,6 +414,41 @@ def _score_generation_case(
                         cited_doc_ids.append(chunk.document_id)
         gate_reports.append(check_generation_gates(permitted_all, context_doc_ids, cited_doc_ids))
 
+    merged = merge_reports(*gate_reports) if gate_reports else SecurityGateReport()
+    return merged, context_doc_ids, cited_doc_ids
+
+
+def _score_generation_case(
+    db: Session,
+    seed: personas_module.EvalSeed,
+    user_ctx: UserContext,
+    embedding_provider: EmbeddingProvider,
+    generator: AnswerGenerator,
+    case: GoldenCase,
+    mode: Mode,
+) -> CaseResult:
+    """Real `--mode generation` scoring: structural gates PLUS real answer-
+    quality scoring against the case's `expected_evidence`/`expected_authority`/
+    etc. Never used by `--mode security` — see `_score_security_generation_case`,
+    which shares the structural-gate computation but never scores quality
+    against a fake, non-reasoning "model"."""
+    from app.permissions.resolver import get_permitted_document_ids
+
+    permitted_all = get_permitted_document_ids(db, user_ctx, None)
+    _raw_claims, context, valid_claims, retrieval_result, status_actual = _run_generation_case_with_visibility(
+        db, user_ctx, embedding_provider, generator, case.query, case.account_slug
+    )
+
+    merged_gates, context_doc_ids, cited_doc_ids = _generation_structural_gates(
+        db, permitted_all, retrieval_result, context, valid_claims
+    )
+
+    note_flags: list[str] = []
+    manual_review: dict[str, str] | None = None
+    generation_payload: dict[str, Any] | None = None
+    account = seed.accounts.get(case.account_slug)
+
+    if context is not None:
         expected_doc_ids = _stable_refs_to_doc_ids(db, seed.org.id, case.account_slug, case.expected_evidence)
         forbidden_doc_ids = _stable_refs_to_doc_ids(db, seed.org.id, case.account_slug, case.forbidden_evidence)
         expected_temporal_doc_id = None
@@ -408,7 +498,6 @@ def _score_generation_case(
         if case.category in MANUAL_REVIEW_CATEGORIES:
             manual_review = {"unauthorized_fact_emitted": "pending_review", "hidden_conflict_leakage": "pending_review"}
 
-    merged_gates = merge_reports(*gate_reports) if gate_reports else SecurityGateReport()
     status_ok = status_actual in case.statuses_ok()
 
     return CaseResult(
@@ -416,6 +505,64 @@ def _score_generation_case(
         status_actual=status_actual, status_ok=status_ok,
         security=merged_gates.summary(), security_violation_count=len(merged_gates.violations),
         generation=generation_payload, manual_review=manual_review, note_flags=note_flags,
+    )
+
+
+def _score_security_generation_case(
+    db: Session,
+    seed: personas_module.EvalSeed,
+    user_ctx: UserContext,
+    embedding_provider: EmbeddingProvider,
+    generator: AnswerGenerator,
+    case: GoldenCase,
+    mode: Mode,
+) -> CaseResult:
+    """`--mode security`'s generation-side structural check: runs the real
+    Milestone 5 generation path (context construction, the deterministic
+    cooperative `security_mode_fake_answer`, citation/provenance
+    validation) with FakeEmbeddingProvider, and scores ONLY the structural
+    security gates from `_generation_structural_gates` — never quality
+    (citation_correct against expected_evidence, authority/temporal
+    correctness, refusal correctness, or a manual-review designation),
+    since none of that is meaningful when nothing actually reasoned about
+    the question. This is what proves an unauthorized chunk never enters
+    `GenerationContext.evidence`, an unauthorized commitment's evidence
+    never enters a `CommitmentContext`'s provenance lists, and an
+    unauthorized id can never survive `validate_and_filter_claims` — not
+    just that retrieval alone stays permission-scoped, which
+    `_score_retrieval_case` already covers for `retrieval_only` cases."""
+    from app.permissions.resolver import get_permitted_document_ids
+
+    permitted_all = get_permitted_document_ids(db, user_ctx, None)
+    _raw_claims, context, valid_claims, retrieval_result, status_actual = _run_generation_case_with_visibility(
+        db, user_ctx, embedding_provider, generator, case.query, case.account_slug
+    )
+
+    merged_gates, context_doc_ids, cited_doc_ids = _generation_structural_gates(
+        db, permitted_all, retrieval_result, context, valid_claims
+    )
+
+    generation_payload: dict[str, Any] | None = None
+    if context is not None:
+        generation_payload = {
+            "status": status_actual,
+            "context_citation_ids": [c.citation_id for c in context.evidence],
+            "context_commitment_ids": [c.citation_id for c in context.commitments],
+            "cited_stable_ids": sorted(
+                (r.source, r.external_id) for r in _resolve_doc_ids_to_refs(db, cited_doc_ids)
+            ),
+        }
+
+    status_ok = _non_generation_status_ok(case.expected_status, case.statuses_ok(), status_actual)
+
+    return CaseResult(
+        case_id=case.id, category=case.category, persona=case.persona, account_slug=case.account_slug, mode=mode,
+        status_actual=status_actual, status_ok=status_ok,
+        security=merged_gates.summary(), security_violation_count=len(merged_gates.violations),
+        # manual_review is always None here — security mode never asks a
+        # real model anything, so it must never designate a case for
+        # semantic manual review (see RunReport.manual_security_review_status).
+        generation=generation_payload, manual_review=None, note_flags=[],
     )
 
 
@@ -575,7 +722,12 @@ def run(
 
         if mode == "security":
             embedding_provider: EmbeddingProvider = FakeEmbeddingProvider()
-            generator: AnswerGenerator = FakeAnswerGenerator()
+            # Deterministic and cooperative — not realistic, but real
+            # enough to make context construction, citation/provenance
+            # validation, and generation-context security-gate collection
+            # actually execute for every generation-capable case. See its
+            # own docstring for exactly what it does and does not prove.
+            generator: AnswerGenerator = FakeAnswerGenerator(respond_with=security_mode_fake_answer)
         else:
             embedding_provider = BgeEmbeddingProvider()
             generator = GeminiAnswerGenerator() if mode == "generation" else FakeAnswerGenerator()
@@ -584,10 +736,25 @@ def run(
 
         for case in cases:
             user_ctx = get_user_context(session, seed.users[case.persona].id)
-            if mode in ("security", "retrieval"):
+            if mode == "retrieval":
                 result = _score_retrieval_case(
-                    session, seed, user_ctx, embedding_provider, case, mode, compute_recall=(mode == "retrieval")
+                    session, seed, user_ctx, embedding_provider, case, mode, compute_recall=True
                 )
+            elif mode == "security":
+                # A retrieval_only case stays retrieval-only even in
+                # security mode; every other case exercises the real
+                # generation path structurally (see
+                # _score_security_generation_case's docstring) — a clean
+                # retrieval pass must never mask a generation-context gate
+                # violation on the same case.
+                if case.retrieval_only:
+                    result = _score_retrieval_case(
+                        session, seed, user_ctx, embedding_provider, case, mode, compute_recall=False
+                    )
+                else:
+                    result = _score_security_generation_case(
+                        session, seed, user_ctx, embedding_provider, generator, case, mode
+                    )
             else:
                 result = _score_generation_case(session, seed, user_ctx, embedding_provider, generator, case, mode)
             case_results.append(result)

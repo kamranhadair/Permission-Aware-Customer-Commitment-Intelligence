@@ -156,14 +156,21 @@ def _freshness_section(report: RunReport) -> list[str]:
     return lines
 
 
+def _generation_quality_clean(r: CaseResult) -> bool:
+    """`security` mode's generation payload has no "score" key at all (it
+    never computes answer-quality metrics against a fake, non-reasoning
+    generator) — only `generation`/`retrieval` mode payloads do."""
+    if not r.generation or "score" not in r.generation:
+        return True
+    return all(r.generation["score"].get(f, True) for f in ("citation_correct", "citation_complete", "forbidden_absent"))
+
+
 def _failure_section(report: RunReport) -> list[str]:
     failures = [
         r for r in report.case_results
         if not r.status_ok
         or r.security_violation_count > 0
-        or (r.generation and not all(
-            r.generation["score"].get(f, True) for f in ("citation_correct", "citation_complete", "forbidden_absent")
-        ))
+        or not _generation_quality_clean(r)
     ]
     if not failures:
         return ["--- Failure analysis ---", "  (no failures)"]
@@ -174,8 +181,12 @@ def _failure_section(report: RunReport) -> list[str]:
         lines.append(f"    status: expected_ok={r.status_ok} actual={r.status_actual}")
         lines.append(f"    security_violations={r.security_violation_count} ({r.security})")
         if r.generation is not None:
-            lines.append(f"    generation.score={r.generation['score']}")
-            lines.append(f"    cited_stable_ids={r.generation['cited_stable_ids']}")
+            if "score" in r.generation:
+                lines.append(f"    generation.score={r.generation['score']}")
+            else:
+                lines.append(f"    generation.context_citation_ids={r.generation.get('context_citation_ids')}")
+                lines.append(f"    generation.context_commitment_ids={r.generation.get('context_commitment_ids')}")
+            lines.append(f"    cited_stable_ids={r.generation.get('cited_stable_ids')}")
         if r.note_flags:
             lines.append(f"    flags={r.note_flags}")
         lines.append(f"    failure_category=UNCLASSIFIED — see docs/evaluation.md for manual triage")

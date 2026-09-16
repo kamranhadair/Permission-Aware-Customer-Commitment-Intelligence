@@ -110,8 +110,9 @@ A measurement layer now exists at `backend/src/app/evaluation/`, over everything
 - **Permission-freshness sequences** mutate a real `GroupMembership`/`DocumentUserAcl` row mid-run and always restore it afterward regardless of outcome (`evaluation/freshness.py`) — proven order-independent by `test_evaluation_freshness.py` (two sequences run in either order produce identical final permission state).
 - **Privilege isolation, verified not assumed**: golden-only fields (`forbidden_evidence`, `note`, `expected_conflict`, ...) never reach `GenerationContext` or the Gemini request — `test_evaluation_privilege_isolation.py` proves this with a sentinel string that must never appear in what the generator actually receives.
 - **Session lifecycle, cleanup, and dataset validation** (added in a follow-up correctness pass before the baseline was trusted — see `docs/evaluation.md`'s "Bugs found and fixed"): `run()` takes an optional `db: Session`; a caller-supplied session (pytest) is used as-is and never closed, while a runner-owned session (the standalone CLI default) always attempts `cleanup.cleanup_eval_orgs()` in `finally` — success, a mid-run exception, or a validation failure all clean up the exact org that run seeded, and a cleanup failure is printed as a warning without masking the original error. `dataset_validation.py` proves every golden case's `expected_evidence`/`forbidden_evidence` against the real seeded database (resolves to exactly one document; `forbidden_evidence` is actually outside the persona's permitted set; the two never overlap) before any case is scored, replacing a "by construction" assumption with a real check. `RunReport` exposes `automated_security_all_clear` / `manual_security_review_status` / `overall_security_status` (not a single boolean) — a failing freshness sequence now correctly fails `automated_security_all_clear`, and `overall_security_status` is `"pending_review"`, not a false `"passed"`, whenever a required manual gate hasn't been adjudicated yet.
-- **Tests**: `backend/tests/test_evaluation_{schema,metrics,security_gates,freshness,privilege_isolation,runner_fake_mode,cleanup,session_lifecycle,security_status,dataset_validation,resume}.py`, 57 new tests, all network-free. `test_retrieval_quality.py` was rewritten to wrap `--mode retrieval` instead of the retired `retrieval/evaluate.py`. 217/217 backend tests pass overall; `permissions/resolver.py`, `retrieval/*`, and `generation/*` were **not modified**.
-- **Baseline results** (2026-09-16, re-verified after the correctness pass with identical numbers): `--mode security` — `overall_security_status = passed` across the full 50-case dataset and all 3 freshness sequences, confirmed to leave zero scratch rows in the database afterward (automatic cleanup, not manual). `--mode retrieval` (real embeddings) — `overall_security_status = passed`, Recall@5 = Recall@10 = 1.00 in every Recall-eligible category, MRR 0.80–1.00; no retrieval bug found. `--mode generation` (real Gemini) — blocked by the free tier's 20-requests/day quota, which Milestone 5 had already exhausted earlier the same calendar day; one live call succeeded (the first real end-to-end ingestion→retrieval→generation pipeline run against a live model, not just a synthetic smoke test), and every subsequent attempt correctly surfaced as `generation_failure` with zero security violations, confirming the failure path holds under a real (not simulated) provider error. See `docs/evaluation.md` for full detail, including why Recall/MRR are only computed for cases with real `expected_evidence` (retrieval has no relevance threshold, so `expected_evidence: []` cases would score a structurally-guaranteed 0 regardless of quality) and why `--mode security`/`retrieval` cannot check the `answered` vs. `insufficient_evidence` distinction (that judgment only exists at the generation layer).
+- **Security mode exercises generation structurally too** (a gap caught on further review: security mode built a `FakeAnswerGenerator` but never called it, so the full-dataset baseline never exercised context construction/citation validation, only retrieval): for every non-`retrieval_only` case, `--mode security` now runs the real `_run_generation_case_with_visibility` orchestration with a deterministic, cooperative `security_mode_fake_answer` (cites only ids it was actually given, so `validate_and_filter_claims`'s real cross-commitment-provenance branch executes on every commitment case) and `_generation_structural_gates()` (shared with real `--mode generation`, minus the answer-quality scoring on top) — a clean retrieval pass can no longer mask a generation-context/citation violation on the same case. Still reports no quality metrics and designates no case for manual review in this mode.
+- **Tests**: `backend/tests/test_evaluation_{schema,metrics,security_gates,freshness,privilege_isolation,runner_fake_mode,cleanup,session_lifecycle,security_status,dataset_validation,resume,security_mode_generation,report}.py`, 63 new tests, all network-free. `test_retrieval_quality.py` was rewritten to wrap `--mode retrieval` instead of the retired `retrieval/evaluate.py`. 223/223 backend tests pass overall; `permissions/resolver.py`, `retrieval/*`, and `generation/*` were **not modified**.
+- **Baseline results** (2026-09-16, re-verified after both correctness passes with identical security-relevant numbers): `--mode security` — `overall_security_status = passed` across the full 50-case dataset and all 3 freshness sequences, now including real generation-path coverage (zero unauthorized chunks/commitment-evidence/citations across all 50 cases and all 6 personas, not just retrieval), confirmed to leave zero scratch rows in the database afterward (automatic cleanup, not manual). `--mode retrieval` (real embeddings) — `overall_security_status = passed`, Recall@5 = Recall@10 = 1.00 in every Recall-eligible category, MRR 0.80–1.00; no retrieval bug found. `--mode generation` (real Gemini) — blocked by the free tier's 20-requests/day quota, which Milestone 5 had already exhausted earlier the same calendar day; one live call succeeded (the first real end-to-end ingestion→retrieval→generation pipeline run against a live model, not just a synthetic smoke test), and every subsequent attempt correctly surfaced as `generation_failure` with zero security violations, confirming the failure path holds under a real (not simulated) provider error. See `docs/evaluation.md` for full detail, including why Recall/MRR are only computed for cases with real `expected_evidence` (retrieval has no relevance threshold, so `expected_evidence: []` cases would score a structurally-guaranteed 0 regardless of quality) and why `--mode security`/`retrieval` cannot check the `answered` vs. `insufficient_evidence` distinction (that judgment only exists at the generation layer).
 - **This is a "Commit 1 only" milestone for product code.** Every bug found during implementation — across both the initial pass and the follow-up correctness pass — was in the new Milestone 6 evaluation infrastructure itself (org-scoping in stable-id resolution, a composite-primary-key assumption in the freshness mutator, a flawed status heuristic in non-generation modes, missing `.env` loading in the CLI entry point, missing standalone-run cleanup, an incomplete security-status computation, unvalidated "by construction" dataset trust, and an over-eager `--resume` completion check) — none were found in the Milestone 2–5 product code. Manufacturing a `fix:` commit against `retrieval/`, `generation/`, or `permissions/` with no evidence a fix was needed would misrepresent a clean result as a found-and-fixed one; see `docs/evaluation.md`'s "Bugs found and fixed" section for the full, honest list of what *was* found and where. The evaluation harness itself did warrant its own correctness commit, which is a different thing from tuning the product to pass the eval.
 - **Known limitations**: `cross_doc_synthesis` and `conflicting_evidence` are honestly below their nominal 10+ targets (documented, not padded); the real-Gemini baseline covers 1 of 50 cases (quota, not a design gap); the two manual-review security gates are `pending_review`, not `pass`, for every designated case since none received a live model response this milestone; a standalone run's cleanup only runs on an ordinary Python exception path (a `finally` block) — a hard process kill between seeding and cleanup would still require manual cleanup, though this was not observed. No production-readiness claim.
 
@@ -512,15 +513,29 @@ overall_security_status) so a failing freshness sequence or a pending
 manual gate can no longer be masked, added dataset_validation.py to prove
 every golden case's forbidden_evidence against the real seeded database
 instead of trusting it "by construction," and fixed --resume to retry a
-generation_failure case instead of treating it as permanently done.
-217/217 backend tests pass overall (57 new, all network-free);
+generation_failure case instead of treating it as permanently done. A
+third pass then fixed a deeper gap: security mode built a
+FakeAnswerGenerator but never called it, so its full-dataset baseline
+never exercised context construction, commitment/evidence provenance, or
+citation validation at all, only retrieval. Fixed with
+_score_security_generation_case (shares _generation_structural_gates()
+with real --mode generation, never scores answer quality or designates
+manual review) and a deterministic, cooperative security_mode_fake_answer
+that cites only ids it was actually given — a retrieval_only case stays
+retrieval-only, every other case now runs the real Milestone 5 generation
+path structurally, and a clean retrieval pass can no longer mask a
+generation-context violation on the same case.
+223/223 backend tests pass overall (63 new, all network-free);
 permissions/resolver.py, retrieval/*, and generation/* were not modified.
 No schema migration. Frontend untouched.
 
-Baseline (2026-09-16, re-verified after the correctness pass with identical
-numbers): --mode security — overall_security_status=passed, full dataset +
-all 3 freshness sequences pass, confirmed to leave zero scratch rows in the
-database afterward. --mode retrieval (real BAAI/bge-small-en-v1.5) —
+Baseline (2026-09-16, re-verified after all three correctness passes with
+identical security-relevant numbers): --mode security —
+overall_security_status=passed, full dataset + all 3 freshness sequences
+pass, now including real generation-path coverage (zero unauthorized
+chunks/commitment-evidence/citations across all 50 cases and all 6
+personas), confirmed to leave zero scratch rows in the database
+afterward. --mode retrieval (real BAAI/bge-small-en-v1.5) —
 overall_security_status=passed, Recall@5=Recall@10=1.00 in every
 Recall-eligible category, MRR 0.80-1.00; no retrieval bug found. --mode
 generation (real Gemini) — blocked by the free tier's 20-requests/day
@@ -529,10 +544,10 @@ verification; one live call succeeded (the first real end-to-end pipeline
 run against a live model, not a synthetic smoke test), and every subsequent
 attempt correctly surfaced as generation_failure with zero security
 violations. This is a "Commit 1 only" milestone for product code: every bug
-found (across both passes) was in the new evaluation infrastructure itself,
-none in the product code evaluation measured — see docs/evaluation.md's
-"Bugs found and fixed" section for the honest, itemized list rather than a
-manufactured fix: commit.
+found (across all three passes) was in the new evaluation infrastructure
+itself, none in the product code evaluation measured — see
+docs/evaluation.md's "Bugs found and fixed" section for the honest,
+itemized list rather than a manufactured fix: commit.
 
 Key decisions, for quick reference:
 - Document-level stable identity ({source, external_id}), never a raw
@@ -580,6 +595,16 @@ Key decisions, for quick reference:
   only answered/insufficient_evidence/account_not_visible are. A case
   pending manual review keeps its persisted result and is never re-sent
   to the provider.
+- Security mode's fake generator is deterministic and cooperative, not
+  realistic: it cites only ids it was actually given, so
+  validate_and_filter_claims' real cross-commitment-provenance branch
+  executes on every commitment case. If it ever produces
+  generation_failure, that means context/validation wiring is broken,
+  not that a "model" refused — treated as a hard failure in this mode
+  regardless of what the case expected.
+- A retrieval_only golden case (none currently exist in the dataset, but
+  the field is honored) stays retrieval-only even in security mode;
+  every other case gets the full generation-path structural check.
 ```
 
 ## Foreign agent configs detected
