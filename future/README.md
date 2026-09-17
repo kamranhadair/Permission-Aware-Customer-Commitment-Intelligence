@@ -5,6 +5,14 @@ This folder is a reminder of what is intentionally **not** implemented in V1.
 Add these only when you are ready to build the real data plane:
 
 1. Authentication and identity provider integration.
+   (Note: as of Milestone 7, the frontend has a trusted *demo-persona
+   switcher* — a Server Action validates a browser-chosen persona against
+   a dev-only registry before setting an httpOnly session cookie, and
+   every server-side read re-verifies that cookie against the registry
+   before deriving X-User-Id. This is still not real authentication: there
+   is no login, no password/token, and any of the seeded demo personas can
+   be chosen by anyone who can reach the app. See CLAUDE.md's Milestone 7
+   section and `backend/src/app/routers/dev_identities.py`.)
 2. Source connectors and ingestion jobs.
    (Note: as of Milestone 3, `backend/src/app/ingestion/` implements the
    ingestion *pipeline* — parsing, normalization, idempotent persistence,
@@ -50,14 +58,20 @@ Add these only when you are ready to build the real data plane:
    tiny abstraction. What's still deferred: a reranker, a second LLM
    verification/entailment pass, and multi-provider fallback — see
    `docs/architecture.md`'s "What Milestone 5 actually implemented".)
-9. Permission-safe query trace/audit storage.
+9. Permission-safe query trace/audit storage, and a frontend audit UI.
    (Partially addressed as of Milestone 4/5: `retrieval/service.py` and
    `generation/service.py` return in-memory `RetrievalTrace`/
    `GenerationTrace` objects that are safe by construction — every id in
    them was already permission-scoped before the trace was built, with no
    "filtered out N" counts anywhere, and the raw rendered generation prompt
    is deliberately excluded. What's still deferred is *storage*: no
-   query-trace database table exists for either stage.)
+   query-trace database table exists for either stage. As of Milestone 7,
+   the frontend's `/api/answer` Route Handler doesn't even forward the
+   trace it receives to the browser, and `/audit` was removed from primary
+   navigation in favor of an honest placeholder — "safe to return" was
+   judged not to be the same claim as "useful product UI" without a real
+   persisted store to browse. A real trace-inspection UI is a future
+   decision, not something to fabricate ahead of that storage existing.)
 10. Golden-dataset evaluation runner.
     (Implemented as of Milestone 6 — `backend/src/app/evaluation/`, a single
     canonical `python -m app.evaluation.run` entry point retiring the
@@ -72,5 +86,12 @@ Add these only when you are ready to build the real data plane:
     dataset (blocked by the free tier's daily quota, not a design gap) and
     an LLM-as-judge or any other automated proxy for free-text claim/wording
     quality — deliberately not built, matching Milestone 5's own reasoning.)
+11. CRM-style account enrichment (ARR, renewal date, owner, segment).
+    (These existed only in the Milestone 1 mock data; the backend's
+    `Account` model (`backend/src/app/models/account.py`) has never had
+    such columns. Milestone 7's real `AccountOverview` renders only
+    `name` plus the real commitment summary rather than preserving the
+    old mock's fabricated fields. Add real columns/an enrichment source
+    only against an actual validated need, not to restore V1's look.)
 
 Do not add a service merely because it appears on this list. Add the smallest component that solves the next validated requirement.

@@ -118,33 +118,41 @@ A measurement layer now exists at `backend/src/app/evaluation/`, over everything
 
 ## Current architecture
 
+As of Milestone 7, the frontend is wired to the real backend for `/`, `/accounts/[slug]`, and the account page's Ask panel. `/search` calls real `POST /search`. `frontend/src/data/mockData.ts` no longer exists — see "Milestone 7" below.
+
 ```
 app/routes (src/app/*)
     ↓
 feature components (src/features/*)
     ↓
-pure domain functions (src/lib/*)
+pure domain functions (src/lib/*)  +  server-only API/session boundary (src/lib/api/*)
     ↓
-typed mock data (src/data/mockData.ts)
+real backend (FastAPI), via server-side fetch only — never from the browser
 ```
 
 Where to look for each concern:
 
-- **Permission filtering**: `frontend/src/lib/permissions.ts` — `canAccessEvidence` / `filterPermittedEvidence`. An evidence item is visible if the user's id is in `allowedUsers` or any of the user's `groups` intersects `allowedGroups`. This is the single chokepoint; every feature that touches evidence calls through it rather than re-implementing a check.
-- **Answer construction**: `frontend/src/lib/search.ts` (`buildCommitmentAnswer`) — filters evidence first, derives citations only from the permitted set, and only reports a conflict if the conflicting evidence is itself permitted.
-- **Commitment classification**: `frontend/src/lib/commitments.ts` — maps `CommitmentAuthority` to display labels and derives `RiskLevel` from status/authority/visible-conflict combinations.
-- **Dashboard aggregation**: `frontend/src/lib/dashboard.ts` — per-account commitment counts (`AccountSummary`).
-- **Mock data**: `frontend/src/data/mockData.ts` — all mock accounts, users, evidence, and commitments. `getUser(slug)` resolves one of three preset personas (`account-manager`, `product-manager`, `vp-product`); `currentUser` defaults to `product-manager`.
-- **Domain types**: `frontend/src/types/domain.ts` — single source of truth for shared contracts (`Evidence`, `Commitment`, `UserContext`, `Account`, `AuditStage`, etc.). Extend types here first when adding a field.
-- **Tests**: `frontend/tests/*.test.ts` — one file per lib module (`permissions`, `search`, `commitments`, `dashboard`), using Node's built-in test runner directly against the TypeScript sources.
+- **Identity/session**: `frontend/src/lib/api/identity.ts` (pure, unit-tested `resolveIdentity`) and `frontend/src/lib/api/session.ts` (`server-only`; wraps it with the real cookie store and the real `GET /dev/demo-users` registry fetch). This is the single chokepoint for turning a browser-supplied demo-persona *choice* into a backend-trusted `X-User-Id` — see "Milestone 7" below for the full boundary.
+- **Backend calls**: `frontend/src/lib/api/backend.ts` (`server-only`; the only place `fetch(BACKEND_URL + ...)` is called, always `cache: "no-store"`) and `frontend/src/lib/api/serverClient.ts` (`server-only`; `listAccounts`/`getAccount`/`getCommitments`/`search`/`listDemoUsers` — none take a `userId` parameter, identity is always derived internally via `session.ts`).
+- **DTO → view model**: `frontend/src/lib/api/dto.ts` (backend wire shapes) and `frontend/src/lib/mapping.ts` (maps to `frontend/src/types/domain.ts` view models — performs no ACL filtering of its own; the backend has already decided what's permitted).
+- **Commitment classification**: `frontend/src/lib/commitments.ts` — maps `CommitmentAuthority` to display labels and derives `RiskLevel` directly from a `CommitmentView`'s own embedded `conflictingEvidence`.
+- **Dashboard aggregation**: `frontend/src/lib/dashboard.ts` — summarizes an already account-scoped `CommitmentView[]` (no client-side account filtering needed anymore).
+- **Domain types**: `frontend/src/types/domain.ts` — view models for real data (`AccountView`, `CommitmentView`, `EvidenceView`, `CitationView`, `RetrievalHitView`, `DemoUserView`). These deliberately are not the old V1 mock shapes (see Milestone 7 below).
+- **Tests**: `frontend/tests/*.test.ts` — pure-function coverage for `commitments`, `dashboard`, `mapping`, `session` (identity resolution), `validation` (request-body rejection), and `askReducer` (the Ask panel's race/reset state machine), all using Node's built-in test runner directly against the TypeScript sources.
 
-Note: `/` and `/accounts/[accountId]` currently always render as `currentUser` (`product-manager`); only `/search` supports switching role via `?as=`. This is a known, accepted cosmetic inconsistency (Milestone 1 decision), not a permission-safety issue — nothing unpermitted is ever shown, the other two screens just don't expose the role switcher yet.
+### Milestone 7 — real frontend/backend integration
 
-### Backend status and wiring the frontend later
-
-The backend now implements identity → permission resolver → ACL filter → permitted documents/chunks/commitments (Milestone 2), source ingestion into that same permission-aware schema (Milestone 3), permission-aware lexical/vector/hybrid retrieval over ingested chunks (Milestone 4), and grounded, claim-level-cited answer generation over that retrieval plus permission-visible commitments (Milestone 5) — see `docs/architecture.md`'s "What Milestone 5 actually implemented" subsection. Reranking beyond RRF remains unimplemented (deliberately, twice now), and the frontend is not connected to any of this yet.
-
-When frontend integration happens, prefer a small repository interface returning the existing `frontend/src/types/domain.ts` types rather than reshaping components around the backend's wire format. Note the backend's Pydantic response contracts already differ from `domain.ts` in a couple of deliberate ways: `Evidence.allowedUsers`/`allowedGroups` are not exposed over the API (ACL membership is server-side authorization data, not something a client should receive), and a commitment's evidence is returned embedded and pre-filtered (`supporting_evidence`/`conflicting_evidence` as full objects) rather than as `evidenceIds`/`conflictingEvidenceIds` arrays, since there is no generic evidence-by-id endpoint to resolve them against.
+- **Trusted identity boundary**: the browser may pick a demo persona (that's the point of the demo), but only `src/app/actions.ts`'s `setDemoUser` Server Action ever writes the `demo_user_id` cookie (`httpOnly`), and only after checking the submitted id against the live `GET /dev/demo-users` registry. Every server-side read re-verifies that cookie's value against the same registry before treating it as a usable identity (`resolveIdentity`) — a missing, malformed, forged, or reseed-stale cookie value resolves to "unresolved," never a guessed/forced identity. `X-User-Id` is set in exactly two places: `serverClient.ts` (Server Component reads) and `src/app/api/answer/route.ts` (the one Route Handler behind the client-interactive Ask panel) — the browser never constructs it itself, and `AskAccountPanel`'s `fetch("/api/answer", ...)` body only ever contains `{query, account_slug}`.
+- **No CORS, no rewrite proxy**: every FastAPI call is server-to-server (Next server → FastAPI); the browser only ever talks to the Next.js app itself. `BACKEND_URL` (`frontend/.env.local`, from `frontend/.env.example`) is server-only, never `NEXT_PUBLIC_*`.
+- **`GET /dev/demo-users`**: dev/demo-only, mounted only when `ENABLE_DEMO_MODE=true` (`backend/.env`); returns only `{id, name, email, label}`, resolved from the single persistent "Demo Org" (`backend/src/app/demo/org.py`), which fails closed (500, ids logged server-side only, never guesses via `.first()`) if more than one org is ever named that.
+- **Persistent demo seed**: `backend/src/app/demo/seed.py` (`python -m app.demo.seed`) — independent of `app.evaluation.*` (that module is scratch/cleanup-oriented by design); reuses only ordinary production primitives (Milestone 3 parsers/ingestion service, plain ORM models, the real embedding provider/backfill). Convergent and idempotent: reruns check each expected row by its own natural key and report `NEW`/`OK`/`FAIL` per item rather than silently no-op'ing or duplicating. Seeds one account (`acme-corp`) and two personas — Maya Chen (`account-management`) and Lena Ortiz (`product`) — telling the flagship SSO-commitment-with-a-hidden-Product-conflict story from `PRODUCT_SPEC.md`.
+- **`/` and `/accounts/[slug]`** are real (`GET /accounts`, `GET /accounts/{slug}`, `GET /accounts/{slug}/commitments`); the account page embeds `AskAccountPanel` (`POST /api/answer` → `POST /answer`), rendering `answered`/`insufficient_evidence`/`not_found`/`operational_error` as four visibly distinct states (a `502` is never reworded into "no evidence exists").
+- **`/search`** calls real `POST /search` server-side (a plain GET-form page, not a client fetch — no Route Handler was needed for it, unlike the Ask panel) and renders backend ordering as-is; `lexical_rank`/`vector_rank`/`hybrid_score` are stripped in `mapRetrievalHit` rather than surfaced as a ranking-debug UI.
+- **`/audit`** was removed from primary navigation and left as an honest static placeholder — Milestone 4/5's retrieval/generation traces are real but were never turned into a persisted, browsable feature, and Milestone 7 did not fabricate one just because the route already existed.
+- **Account fields**: the backend's `Account` model has no ARR/renewal-date/owner/segment columns — `AccountOverview` renders only `name` + the real commitment summary, not the old mock's fabricated CRM fields.
+- **Evidence fields**: cards render `source`/`title`/`occurred_at`/`content` only — `sensitivity` exists on `ChunkOut` but was deliberately left unrendered (no concrete product use for it yet); `allowedUsers`/`allowedGroups`/ACL fields don't exist on any frontend type at all.
+- **Citations**: rendered directly from the backend's `citations` array (server-supplied `E1`/`E2`/... labels) as a separate "Evidence" section below the answer text — no regex-parsing of answer prose, no client-side provenance engine, no `C*` internal id ever reaches a frontend type.
+- **Retired**: `frontend/src/data/mockData.ts`, `frontend/src/lib/permissions.ts`, `frontend/src/lib/search.ts`, and `frontend/src/features/search/components/SearchAnswerPanel.tsx` — all had zero remaining runtime consumers once the four real routes were wired (verified by grep before deletion, not assumed).
 
 ## Important domain rules
 
@@ -203,20 +211,20 @@ Read in this order when picking up this project fresh:
 
 ## Commands
 
-All commands run from the repo root via npm workspaces (`frontend` is the one workspace).
+All commands run from the repo root via npm workspaces (`frontend` is the one workspace). Real data now requires the backend running (see below) with `frontend/.env.local` (copy `frontend/.env.example`) defining server-only `BACKEND_URL`.
 
 ```bash
 npm install       # install deps (Node.js 22+ required)
 npm run dev       # start Next.js dev server at http://localhost:3000
 npm run build     # production build
 npm run typecheck # tsc --noEmit
-npm test          # run domain tests
+npm test          # run domain tests (network-free — no backend needed)
 ```
 
 Tests use Node's built-in test runner against the TypeScript sources directly (`node --experimental-strip-types --test tests/*.test.ts`) — no Jest/Vitest config exists. To run a single test file from `frontend/`:
 
 ```bash
-node --experimental-strip-types --test tests/permissions.test.ts
+node --experimental-strip-types --test tests/session.test.ts
 ```
 
 ### Backend commands
@@ -256,6 +264,13 @@ python -m app.evaluation.run --mode retrieval              # real embeddings, no
 python -m app.evaluation.run --mode generation --limit 15  # real Gemini, quota-budgeted
 python -m app.evaluation.run --mode generation --resume    # resume a quota-interrupted generation run
 python -m app.evaluation.run --review-case-id ID --review-gate unauthorized_fact_emitted --review-verdict pass
+
+# Demo (Milestone 7) — a persistent, non-scratch seed for the integrated
+# frontend demo; independent of the evaluation seeding above:
+ENABLE_DEMO_MODE=true  # in backend/.env — gates GET /dev/demo-users
+python -m app.demo.seed                        # real embeddings (needs the `embeddings` extra)
+python -m app.demo.seed --embedding-provider fake  # skip loading the real model
+uvicorn app.main:app --reload  # ENABLE_DEMO_MODE=true must be set for the frontend's demo-user switcher to work
 ```
 
 ## Milestone status
@@ -638,6 +653,104 @@ Key decisions, for quick reference:
 - A retrieval_only golden case (none currently exist in the dataset, but
   the field is honored) stays retrieval-only even in security mode;
   every other case gets the full generation-path structural check.
+```
+
+```
+Milestone 7 — Real frontend/backend integration
+Status: COMPLETE
+
+Result:
+The Next.js frontend now runs against the real backend for /, /accounts/
+[slug], and an embedded account-page "Ask about this account" panel
+(POST /answer); /search calls real POST /search. Every authorization-
+sensitive read is server-side (Server Components using
+frontend/src/lib/api/serverClient.ts, cache: "no-store" throughout); the
+one browser-facing interactive surface, the Ask panel, talks only to a
+same-origin Route Handler (src/app/api/answer/route.ts) that resolves
+identity from a registry-verified session cookie and rejects any request
+body carrying extra fields (user_id/role/groups/org_id/...) with a 400
+before it can ever reach FastAPI. The browser never constructs X-User-Id
+itself. No CORS middleware was added to FastAPI and no next.config.ts
+rewrite was needed — every backend call is server-to-server.
+
+A new dev-only GET /dev/demo-users endpoint (mounted only when
+ENABLE_DEMO_MODE=true) lets the frontend discover currently valid demo
+identities without hardcoding database-generated ids, which are not
+stable across a reseed; it fails closed (500, org ids logged server-side
+only) if more than one "Demo Org" ever exists rather than guessing via
+.first(). A new, persistent demo seed (backend/src/app/demo/seed.py,
+backend/fixtures/demo/) is deliberately independent of
+app.evaluation.{personas,fixtures_loader} — it reuses only ordinary
+production primitives (Milestone 3 parsers/ingestion service, plain ORM
+models, the real embedding provider) and is convergent/idempotent rather
+than a one-shot script: rerunning it checks each expected row by its own
+natural key and self-heals drift (e.g. a corrected account display name)
+rather than silently no-op'ing or duplicating.
+
+7 new backend tests (test_dev_identities.py, test_demo_seed.py) and 5 new/
+rewritten frontend test files (session, validation, mapping, askReducer,
+plus adapted commitments/dashboard tests for the new view-model shapes) —
+230/230 backend tests pass, alembic check reports zero drift, 39/39
+frontend tests pass, frontend typecheck and production build are clean.
+mockData.ts, lib/permissions.ts, lib/search.ts, and SearchAnswerPanel.tsx
+were deleted after confirming zero remaining runtime consumers by grep.
+
+A full manual smoke was run against the real backend and the persistent
+demo seed (real BAAI/bge-small-en-v1.5 embeddings): Maya Chen (account-
+management) sees both demo commitments with no conflict badge; Lena Ortiz
+(product) sees the same two commitments with the SSO commitment's conflict
+badge visible, including the confidential Slack evidence text ("...is
+exploratory...") that Maya never receives. A nonexistent account and an
+unresolved-session state both render the same neutral copy, never a
+permission-specific message. POST /api/answer correctly returned 401
+without a session cookie, 400 for a body carrying extra user_id/role
+fields (never forwarded to FastAPI), and — for a real question asked
+through the full stack — a 502/operational_error, which the request log
+confirmed was a genuine Gemini free-tier quota exhaustion at the backend
+(POST /answer itself returned 502), not a frontend integration bug; the
+Route Handler correctly surfaced this as "temporarily unavailable" rather
+than mislabeling it as "no evidence exists." Per Milestone 6's already-
+documented quota pattern (~1-2 live calls/day), no further live attempts
+were made — automated tests do not depend on Gemini either way.
+
+Key decisions, for quick reference:
+- Identity flows browser → setDemoUser Server Action (validates the
+  submitted persona id against the live demo-user registry before ever
+  writing the httpOnly cookie) → server-side resolveIdentity (re-verifies
+  the cookie value against that same registry on every read, so a
+  forged/stale/arbitrary DB id is "unresolved," never a usable identity)
+  → X-User-Id, set only in serverClient.ts and the /api/answer Route
+  Handler. No cookie-signing infrastructure was added — registry
+  re-verification on every read is what makes an HttpOnly cookie's mere
+  presence insufficient to trust on its own.
+- AskAccountPanel is keyed by `${accountSlug}:${personaId}` — a demo
+  persona's numeric id is fine to use as a React identity key (it's never
+  used to construct an auth header client-side), and this key change is
+  what forces the panel to unmount/remount (discarding any in-flight
+  request and previously rendered answer) on a persona or account switch.
+- A pure askReducer (src/features/commitments/lib/askReducer.ts) makes
+  the two race-safety properties — RESET always clears to idle; a
+  RESOLVED for a non-current requestId is silently discarded — directly
+  unit-testable without rendering anything.
+- The backend's retrieval/generation trace is intentionally never
+  forwarded past the Route Handler boundary and never became a frontend
+  feature — "safe to return" (Milestone 4/5) is not the same claim as
+  "useful product UI" for this milestone. /audit was removed from primary
+  navigation and left as an honest static placeholder instead.
+- Evidence cards render source/title/occurred_at/content only;
+  sensitivity exists on the backend's ChunkOut but was deliberately left
+  unrendered — API presence alone isn't product justification.
+- Citations render as a separate "Evidence" list from the backend's own
+  citation objects, never by regex-scanning answer prose for [E*] tokens
+  — avoiding a second, client-side provenance interpretation engine.
+- The backend's Account model has no ARR/renewal/owner/segment columns;
+  the real AccountOverview renders only what the backend actually
+  returns rather than preserving the old mock's fabricated CRM fields.
+- "Demo Org" has no unique/slug column at the database level (adding one
+  was judged out of scope — "don't modify the production schema just to
+  solve demo identity"); both the seed and GET /dev/demo-users resolve it
+  through one shared, tested function (app/demo/org.py) that fails closed
+  on more than one match rather than each implementing its own .first().
 ```
 
 ## Foreign agent configs detected

@@ -1,4 +1,4 @@
-import type { Commitment, CommitmentAuthority, Evidence, RiskLevel } from "../types/domain.ts";
+import type { CommitmentAuthority, CommitmentView, RiskLevel } from "../types/domain.ts";
 
 const AUTHORITY_LABELS: Record<CommitmentAuthority, string> = {
   customer_expectation: "Customer expectation",
@@ -12,9 +12,17 @@ export function getCommitmentLabel(authority: CommitmentAuthority): string {
   return AUTHORITY_LABELS[authority];
 }
 
-export function getCommitmentRisk(commitment: Commitment, evidence: Evidence[]): RiskLevel {
-  const availableEvidence = new Set(evidence.map((item) => item.id));
-  const hasVisibleConflict = commitment.conflictingEvidenceIds.some((id) => availableEvidence.has(id));
+// The backend already decides which conflicting evidence (if any) a caller
+// may see — a commitment's `conflictingEvidence` array is empty either
+// because there truly is none, or because none of it is permitted for this
+// user, and those two cases are indistinguishable by design (see
+// backend Milestone 2: "an empty conflicting list carries no signal about
+// whether unauthorized conflicting evidence exists"). This function reads
+// that array directly rather than cross-referencing ids against a
+// separately-filtered evidence list, which is no longer necessary once the
+// backend hands back already-permitted, already-embedded evidence.
+export function getCommitmentRisk(commitment: CommitmentView): RiskLevel {
+  const hasVisibleConflict = commitment.conflictingEvidence.length > 0;
 
   if (commitment.status === "overdue") {
     return "high";

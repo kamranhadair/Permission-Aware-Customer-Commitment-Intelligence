@@ -1,0 +1,11 @@
+{
+  "channels": [
+    {
+      "id": "DEMO-PRODUCT-INTERNAL",
+      "name": "product-acme-internal",
+      "account_slug": "acme-corp",
+      "sensitivity": "confidential",
+      "acl": {"users": [], "groups": ["product"]}
+    }
+  ]
+}

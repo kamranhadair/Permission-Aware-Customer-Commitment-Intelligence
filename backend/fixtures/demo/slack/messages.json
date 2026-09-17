@@ -1,0 +1,10 @@
+{
+  "messages": [
+    {
+      "channel_id": "DEMO-PRODUCT-INTERNAL",
+      "ts": "1723600000.0001",
+      "user": "lena@demo.example",
+      "text": "The November SSO date Sales mentioned to Acme is exploratory — Product has not approved it. Do not confirm it externally until scope is signed off."
+    }
+  ]
+}

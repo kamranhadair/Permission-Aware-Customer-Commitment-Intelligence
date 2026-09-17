@@ -1,7 +1,8 @@
 import { Badge } from "@/components/ui/Badge";
+import { EvidenceCard } from "@/features/commitments/components/EvidenceCard";
 import { getCommitmentLabel, getCommitmentRisk } from "@/lib/commitments";
 import { formatDate } from "@/lib/format";
-import type { Commitment, Evidence } from "@/types/domain";
+import type { CommitmentView } from "@/types/domain";
 
 const statusStyle = {
   on_track: { label: "On track", tone: "success" as const },
@@ -10,11 +11,16 @@ const statusStyle = {
   delivered: { label: "Delivered", tone: "success" as const },
 };
 
-export function CommitmentCard({ commitment, visibleEvidence }: { commitment: Commitment; visibleEvidence: Evidence[] }) {
+// Renders the commitment's own embedded, already-permission-filtered
+// evidence directly — no separately-fetched "visible evidence" list to
+// cross-reference against id arrays. A conflict badge appears exactly
+// when conflictingEvidence is non-empty; if the backend omitted it
+// (because it doesn't exist, or because this caller can't see it), there
+// is no hint of it anywhere here.
+export function CommitmentCard({ commitment }: { commitment: CommitmentView }) {
   const status = statusStyle[commitment.status];
-  const risk = getCommitmentRisk(commitment, visibleEvidence);
-  const visibleIds = new Set(visibleEvidence.map((item) => item.id));
-  const visibleConflicts = commitment.conflictingEvidenceIds.filter((id) => visibleIds.has(id));
+  const risk = getCommitmentRisk(commitment);
+  const hasConflict = commitment.conflictingEvidence.length > 0;
 
   return (
     <article className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
@@ -35,9 +41,26 @@ export function CommitmentCard({ commitment, visibleEvidence }: { commitment: Co
           </div>
         ) : null}
       </div>
-      {visibleConflicts.length > 0 ? (
+
+      {hasConflict ? (
         <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-950">
           <span className="font-semibold">Conflict detected.</span> Customer-facing expectation exceeds permitted internal commitment evidence.
+        </div>
+      ) : null}
+
+      {commitment.supportingEvidence.length > 0 ? (
+        <div className="mt-4 grid gap-3 lg:grid-cols-2">
+          {commitment.supportingEvidence.map((item) => (
+            <EvidenceCard key={item.id} evidence={item} />
+          ))}
+        </div>
+      ) : null}
+
+      {hasConflict ? (
+        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+          {commitment.conflictingEvidence.map((item) => (
+            <EvidenceCard key={item.id} evidence={item} />
+          ))}
         </div>
       ) : null}
     </article>

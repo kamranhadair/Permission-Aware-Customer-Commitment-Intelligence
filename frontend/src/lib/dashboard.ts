@@ -1,14 +1,16 @@
-import type { AccountSummary, Commitment } from "../types/domain.ts";
+import type { AccountSummary, CommitmentView } from "../types/domain.ts";
 
-export function getAccountSummary(accountId: string, commitments: Commitment[]): AccountSummary {
-  const accountCommitments = commitments.filter((item) => item.accountId === accountId);
-
+// Takes an already account-scoped commitment list (GET
+// /accounts/{slug}/commitments is inherently scoped to one account, unlike
+// the old mock's single global array) — no accountId filtering step is
+// needed here anymore.
+export function getAccountSummary(commitments: CommitmentView[]): AccountSummary {
   return {
-    total: accountCommitments.length,
-    open: accountCommitments.filter((item) => item.status !== "delivered").length,
-    unsupported: accountCommitments.filter((item) => item.authority === "sales_unapproved").length,
-    atRisk: accountCommitments.filter((item) => item.status === "at_risk").length,
-    overdue: accountCommitments.filter((item) => item.status === "overdue").length,
-    delivered: accountCommitments.filter((item) => item.status === "delivered").length,
+    total: commitments.length,
+    open: commitments.filter((item) => item.status !== "delivered").length,
+    unsupported: commitments.filter((item) => item.authority === "sales_unapproved").length,
+    atRisk: commitments.filter((item) => item.status === "at_risk").length,
+    overdue: commitments.filter((item) => item.status === "overdue").length,
+    delivered: commitments.filter((item) => item.status === "delivered").length,
   };
 }

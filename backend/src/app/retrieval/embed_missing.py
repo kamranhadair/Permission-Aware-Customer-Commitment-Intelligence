@@ -17,12 +17,37 @@ import argparse
 import sys
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models import Chunk
-from app.retrieval.embeddings import BgeEmbeddingProvider
+from app.retrieval.embeddings import BgeEmbeddingProvider, EmbeddingProvider
 
 DEFAULT_BATCH_SIZE = 64
+
+
+def embed_missing_chunks(session: Session, provider: EmbeddingProvider, batch_size: int = DEFAULT_BATCH_SIZE) -> int:
+    """Embeds every chunk with embedding IS NULL, in batches, committing per
+    batch. Returns the total number embedded. Shared by this CLI and the
+    Milestone 7 demo seed (backend/src/app/demo/seed.py) — both need the
+    exact same "embed whatever isn't embedded yet" behavior, not a second
+    implementation of it.
+    """
+    total = 0
+    while True:
+        chunks = list(
+            session.scalars(
+                select(Chunk).where(Chunk.embedding.is_(None)).order_by(Chunk.id).limit(batch_size)
+            )
+        )
+        if not chunks:
+            break
+        embeddings = provider.embed_documents([chunk.content for chunk in chunks])
+        for chunk, embedding in zip(chunks, embeddings):
+            chunk.embedding = embedding
+        session.commit()
+        total += len(chunks)
+    return total
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,25 +57,8 @@ def main(argv: list[str] | None = None) -> int:
 
     provider = BgeEmbeddingProvider()
     session = SessionLocal()
-    total = 0
     try:
-        while True:
-            chunks = list(
-                session.scalars(
-                    select(Chunk)
-                    .where(Chunk.embedding.is_(None))
-                    .order_by(Chunk.id)
-                    .limit(args.batch_size)
-                )
-            )
-            if not chunks:
-                break
-            embeddings = provider.embed_documents([chunk.content for chunk in chunks])
-            for chunk, embedding in zip(chunks, embeddings):
-                chunk.embedding = embedding
-            session.commit()
-            total += len(chunks)
-            print(f"embedded {len(chunks)} chunk(s) (running total: {total})")
+        total = embed_missing_chunks(session, provider, args.batch_size)
     finally:
         session.close()
 

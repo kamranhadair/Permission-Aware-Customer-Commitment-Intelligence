@@ -271,28 +271,70 @@ an LLM-as-judge or any other automated proxy for claim-level factual
 
 **Why security/retrieval mode cannot check the `answered` vs. `insufficient_evidence` distinction**: that judgment is made entirely at the generation layer (the model's own declaration, or the zero-retrieved-context short-circuit in `generation/service.py`) — retrieval alone has no way to distinguish "found the right thing" from "found the only thing available, which happens to be irrelevant." Both non-generation modes can only meaningfully check the `account_not_visible` outcome (retrieve() returning `None`); an `answered`/`insufficient_evidence` expectation is reported as not-applicable rather than a false failure.
 
+### What Milestone 7 actually implemented
+
+Milestone 7 (`frontend/src/lib/api/`, `frontend/src/app/actions.ts`, `frontend/src/app/api/answer/`, `backend/src/app/demo/`, `backend/src/app/routers/dev_identities.py`) is not a new pipeline stage — it wires the existing Next.js frontend to everything Milestones 2–5 built, without weakening any authorization property:
+
+```
+IMPLEMENTED NOW (in addition to Milestones 2-6's lists)
+a trusted server-side identity boundary: the browser may choose a demo
+  persona, but only a Server Action (validated against the live demo-user
+  registry) ever writes the identity cookie, and every server-side read
+  re-verifies that cookie's value against the same registry before
+  treating it as a usable X-User-Id — an HttpOnly cookie's mere presence
+  is deliberately NOT trusted on its own (see CLAUDE.md's Milestone 7
+  section for why)
+  → real Server-Component reads for GET /accounts, GET /accounts/{slug},
+    GET /accounts/{slug}/commitments, all cache: "no-store"
+  → one narrow Route Handler (POST /api/answer) for the one browser-
+    interactive surface (the account page's Ask panel), which strictly
+    validates the request body to exactly {query, account_slug} and
+    rejects (400) anything else — a client-asserted user_id/role/groups/
+    org_id can never reach the outbound FastAPI request
+  → a dev/demo-only GET /dev/demo-users endpoint, gated by
+    ENABLE_DEMO_MODE, returning only presentation-safe fields, which
+    fails closed (never guesses via .first()) if more than one "Demo Org"
+    exists
+  → a persistent, convergent, idempotent demo seed
+    (backend/src/app/demo/seed.py) deliberately independent of
+    app.evaluation.{personas,fixtures_loader} — reusing only ordinary
+    production primitives (ingestion parsers/service, ORM models, the
+    real embedding provider)
+  → DTO -> view-model mapping (frontend/src/lib/mapping.ts) that performs
+    no ACL filtering of its own — the backend has already decided what's
+    permitted, and the old V1 mock-era client-side filter
+    (lib/permissions.ts) was deleted rather than left as a misleading
+    second "chokepoint"
+
+STILL FUTURE (unchanged)
+real authentication (X-User-Id remains dev-only)
+  → group-membership sync from a real identity provider
+  → real Zendesk/Gong/Slack API connectors and OAuth
+  → a persisted/browsable audit-trace UI (the backend's traces are real
+    but Milestone 7 deliberately did not turn them into a frontend
+    feature — see below)
+  → CRM-style account enrichment (ARR, renewal date, owner, segment) —
+    the backend's Account model has no such columns; the real
+    AccountOverview renders only what the backend actually returns
+```
+
+**Why the frontend never asserts its own identity claim**: the project's core lesson — permissions are part of the retrieval architecture, not something layered on afterward — applies just as much to the frontend/backend boundary as to retrieval/generation. If the browser could send any part of its own authorization context (a user id, a role, a group list), the backend's permission resolver would no longer be the sole source of truth for who's asking; a compromised or merely buggy browser-side value could silently widen access. The demo persona picker is real UX (the browser *chooses*), but the *authorization claim* is always re-derived and re-verified server-side before it reaches FastAPI.
+
+**Why `/audit` stays a placeholder instead of becoming a real page**: Milestone 4/5's `RetrievalTrace`/`GenerationTrace` are safe to return (every id in them was already permission-scoped), but "safe to return" was never the same claim as "useful product UI," and no persisted/queryable trace store exists to browse independently of the request that produced it. Milestone 7 removed `/audit` from primary navigation and left it as an honest static page rather than either fabricating a fake trace history or quietly repurposing the trace into a debugging feature nobody asked for.
+
 ## Frontend feature boundaries
 
-- `features/accounts` owns account-level presentation.
-- `features/commitments` owns commitment cards and authority/risk presentation.
-- `features/search` owns the grounded Q&A experience.
-- `features/audit` owns a safe trace representation.
-- `lib` contains domain functions, including permission filtering and summary calculations.
-- `data` contains replaceable mock records only.
-- `types` contains shared domain contracts.
+- `features/accounts` owns account-level presentation (`AccountOverview`, `AccountList`).
+- `features/commitments` owns commitment cards, authority/risk presentation, the Ask panel, and its pure state machine (`lib/askReducer.ts`).
+- `features/search` owns the raw evidence-search results presentation.
+- `lib/api` owns the server-only backend/session/repository boundary (see "What Milestone 7 actually implemented" above); `lib/mapping.ts` owns DTO → view-model translation.
+- `lib` (top level) contains domain-presentation functions (`commitments.ts`, `dashboard.ts`) and formatting helpers — no permission filtering lives here anymore; that decision belongs entirely to the backend.
+- `types` contains shared view-model contracts for real data.
+
+There is no `features/audit` and no `data/` (mock records) directory anymore — see "What Milestone 7 actually implemented" above.
 
 ## Backend attachment point
 
-A backend now exists (`backend/`, see Milestone 2 status above), but the frontend is not wired to it yet — that remains future work, deliberately out of scope for Milestone 2. When that wiring happens, prefer a small API client/repository layer that returns the existing domain types. Avoid rewriting components around backend response shapes.
+The frontend is wired to the backend as of Milestone 7 (`/`, `/accounts/[slug]`, the account page's Ask panel, and `/search`) — see "What Milestone 7 actually implemented" above for the identity boundary, the API/repository layer (`frontend/src/lib/api/`), and the DTO → view-model mapping (`frontend/src/lib/mapping.ts`) that replaced the plan sketched below.
 
-Example future boundary:
-
-```ts
-interface CommitmentRepository {
-  listByAccount(accountId: string): Promise<Commitment[]>;
-}
-```
-
-The frontend does not need this interface until it is actually being wired to the backend; adding layers solely for hypothetical flexibility is intentionally avoided.
-
-Note that the backend's response contracts already differ from `frontend/src/types/domain.ts` in two deliberate ways worth resolving at wiring time: `Evidence.allowedUsers`/`allowedGroups` are not exposed over the API (ACL membership is server-side authorization data), and a commitment's evidence comes back embedded and pre-filtered (`supporting_evidence`/`conflicting_evidence` as full objects) rather than as `evidenceIds`/`conflictingEvidenceIds` arrays, since there is no generic evidence-by-id endpoint to resolve them against.
+The backend's response contracts differ from `frontend/src/types/domain.ts`'s real-data view models in the two ways anticipated here, now resolved: `allowedUsers`/`allowedGroups` are not exposed over the API and don't exist on any frontend type at all (not merely left empty), and a commitment's evidence arrives embedded and pre-filtered (`supportingEvidence`/`conflictingEvidence` as full objects) rather than as id arrays to resolve against a separate list — `CommitmentCard` renders them directly.

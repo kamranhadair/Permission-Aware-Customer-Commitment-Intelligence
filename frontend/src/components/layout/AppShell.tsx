@@ -1,19 +1,26 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
-import { currentUser } from "@/data/mockData";
+import { UserSwitcher } from "@/components/ui/UserSwitcher";
+import { listDemoUsers } from "@/lib/api/serverClient";
+import { resolveServerUser } from "@/lib/api/session";
 
 const nav = [
-  { href: "/", label: "Overview" },
-  { href: "/accounts/acme-corp", label: "Accounts" },
-  { href: "/search", label: "Ask" },
-  { href: "/audit", label: "Audit" },
+  { href: "/", label: "Accounts" },
+  { href: "/search", label: "Search" },
 ];
 
-export function AppShell({ children }: { children: ReactNode }) {
+// Async Server Component: resolves the current demo session and the
+// demo-user registry server-side, on every request (no client cache),
+// so the header always reflects who the server currently believes is
+// asking — never a value read out of browser-writable state. /audit is
+// deliberately not in primary navigation (see src/app/audit/page.tsx).
+export async function AppShell({ children }: { children: ReactNode }) {
+  const [demoUsers, currentUser] = await Promise.all([listDemoUsers(), resolveServerUser()]);
+
   return (
     <div className="min-h-screen bg-zinc-50 text-zinc-950">
       <header className="sticky top-0 z-20 border-b border-zinc-200/80 bg-white/95 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-6 px-6 py-4">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-6 py-4">
           <div className="flex items-center gap-8">
             <Link href="/" className="flex items-center gap-3 font-semibold tracking-tight">
               <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-zinc-950 text-sm font-bold text-white">CI</span>
@@ -27,12 +34,16 @@ export function AppShell({ children }: { children: ReactNode }) {
               ))}
             </nav>
           </div>
-          <div className="flex items-center gap-3 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2">
-            <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
-            <div className="hidden text-right sm:block">
-              <p className="text-xs font-semibold text-zinc-900">{currentUser.name}</p>
-              <p className="text-[11px] text-zinc-500">{currentUser.role}</p>
-            </div>
+          <div className="flex items-center gap-3">
+            {currentUser ? (
+              <div className="hidden text-right sm:block">
+                <p className="text-xs font-semibold text-zinc-900">{currentUser.name}</p>
+                {currentUser.label ? <p className="text-[11px] text-zinc-500">{currentUser.label}</p> : null}
+              </div>
+            ) : (
+              <p className="hidden text-xs text-zinc-500 sm:block">No persona selected</p>
+            )}
+            <UserSwitcher demoUsers={demoUsers} currentUserId={currentUser?.id ?? null} />
           </div>
         </div>
       </header>

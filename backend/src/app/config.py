@@ -22,5 +22,11 @@ class Settings(BaseSettings):
     # setup) on another machine.
     database_url: str
 
+    # Milestone 7: gates GET /dev/demo-users. Defaults closed — the route is
+    # not mounted at all unless explicitly enabled, matching this project's
+    # existing dev-only posture (X-User-Id) rather than adding a new auth
+    # layer. Never true outside local/demo use.
+    enable_demo_mode: bool = False
+
 
 settings = Settings()

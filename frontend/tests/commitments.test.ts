@@ -1,52 +1,65 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { getCommitmentLabel, getCommitmentRisk } from "../src/lib/commitments.ts";
-import type { Commitment, Evidence } from "../src/types/domain.ts";
+import type { CommitmentView, EvidenceView } from "../src/types/domain.ts";
 
-const commitment: Commitment = {
-  id: "com-1",
-  accountId: "acme-corp",
-  statement: "SSO by November 15",
-  promisedBy: "Sarah Chen",
-  promiseDate: "2026-08-12",
-  deliveryDate: "2026-11-15",
+const base: CommitmentView = {
+  id: "1",
+  statement: "Statement",
+  promisedBy: "Someone",
+  promiseDate: "2026-01-01",
   authority: "sales_unapproved",
-  status: "at_risk",
-  evidenceIds: ["ev-call"],
-  conflictingEvidenceIds: ["ev-slack"],
+  status: "on_track",
+  supportingEvidence: [],
+  conflictingEvidence: [],
 };
 
-const evidence: Evidence[] = [
-  {
-    id: "ev-call",
-    source: "call",
-    accountId: "acme-corp",
-    title: "Customer call",
-    excerpt: "We will have SSO by November.",
-    department: "sales",
-    timestamp: "2026-08-12T14:30:00Z",
-    sensitivity: "customer_shared",
-    allowedUsers: [],
-    allowedGroups: ["sales"],
-  },
-  {
-    id: "ev-slack",
-    source: "slack",
-    accountId: "acme-corp",
-    title: "Product leadership thread",
-    excerpt: "November is exploratory; do not commit externally.",
-    department: "product",
-    timestamp: "2026-08-14T09:12:00Z",
-    sensitivity: "confidential",
-    allowedUsers: [],
-    allowedGroups: ["product", "exec"],
-  },
-];
+const conflictEvidence: EvidenceView = {
+  id: "e1",
+  source: "slack",
+  title: "Internal thread",
+  excerpt: "not approved",
+  occurredAt: "2026-01-01T00:00:00Z",
+};
 
-test("renders a clear authority label for an unapproved sales promise", () => {
+test("getCommitmentLabel gives each authority a distinct human-readable label", () => {
+  assert.equal(getCommitmentLabel("customer_expectation"), "Customer expectation");
   assert.equal(getCommitmentLabel("sales_unapproved"), "Sales promise · unapproved");
+  assert.equal(getCommitmentLabel("product_target"), "Product target · not committed");
+  assert.equal(getCommitmentLabel("product_approved"), "Product commitment · approved");
+  assert.equal(getCommitmentLabel("contractual"), "Contractual obligation");
 });
 
-test("rates a conflicting unapproved promise as high risk", () => {
-  assert.equal(getCommitmentRisk(commitment, evidence), "high");
+test("overdue is always high risk regardless of authority or conflict", () => {
+  assert.equal(getCommitmentRisk({ ...base, status: "overdue", authority: "contractual" }), "high");
+});
+
+test("sales_unapproved with a visible (already-permitted) conflict is high risk", () => {
+  assert.equal(
+    getCommitmentRisk({ ...base, authority: "sales_unapproved", status: "on_track", conflictingEvidence: [conflictEvidence] }),
+    "high",
+  );
+});
+
+test("sales_unapproved with no conflict and not at_risk is not automatically high", () => {
+  assert.equal(getCommitmentRisk({ ...base, authority: "sales_unapproved", status: "on_track" }), "low");
+});
+
+test("at_risk status alone is medium", () => {
+  assert.equal(getCommitmentRisk({ ...base, authority: "product_approved", status: "at_risk" }), "medium");
+});
+
+test("product_target authority alone is medium", () => {
+  assert.equal(getCommitmentRisk({ ...base, authority: "product_target", status: "on_track" }), "medium");
+});
+
+test("on_track, no conflict, approved authority is low risk", () => {
+  assert.equal(getCommitmentRisk({ ...base, authority: "product_approved", status: "on_track" }), "low");
+});
+
+test("risk reads the commitment's own embedded conflictingEvidence — an empty array (no conflict, or one this caller can't see) is never treated as risky by itself", () => {
+  assert.equal(
+    getCommitmentRisk({ ...base, authority: "product_approved", status: "on_track", conflictingEvidence: [] }),
+    "low",
+  );
 });

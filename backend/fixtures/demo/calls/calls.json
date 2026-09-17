@@ -1,0 +1,13 @@
+{
+  "calls": [
+    {
+      "id": "DEMO-CALL-1",
+      "account_slug": "acme-corp",
+      "title": "Acme weekly sync · Aug 12",
+      "transcript": "AE: Thanks for hopping on. To confirm, we will have SSO ready for Acme by November 15.\n\nCustomer: Great, that lines up with our security rollout timeline.",
+      "occurred_at": "2026-08-12T14:30:00Z",
+      "sensitivity": "customer_shared",
+      "acl": {"users": [], "groups": ["account-management", "product"]}
+    }
+  ]
+}
