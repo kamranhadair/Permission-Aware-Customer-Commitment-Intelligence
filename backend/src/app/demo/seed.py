@@ -309,16 +309,27 @@ def _seed_commitments(db: Session, accounts: dict[str, Account], report: SeedRep
     )
 
 
-def _embed_chunks(db: Session, provider: EmbeddingProvider, report: SeedReport) -> None:
-    total = embed_missing_chunks(db, provider)
+def _embed_chunks(db: Session, org: Organization, provider: EmbeddingProvider, report: SeedReport) -> None:
+    # org_id=org.id: the demo seed must never mutate embeddings belonging
+    # to unrelated development data outside Demo Org (unlike the plain
+    # `python -m app.retrieval.embed_missing` CLI, which is the deliberate
+    # global-backfill tool and keeps its own default org_id=None).
+    total = embed_missing_chunks(db, provider, org_id=org.id)
     if total:
         report.created(f"embedded {total} chunk(s)")
     else:
         report.ok("no chunks needed embedding")
 
-    remaining = list(db.scalars(select(Chunk.id).where(Chunk.embedding.is_(None))))
+    remaining = list(
+        db.scalars(
+            select(Chunk.id)
+            .join(SourceDocument, SourceDocument.id == Chunk.document_id)
+            .join(Account, Account.id == SourceDocument.account_id)
+            .where(Account.org_id == org.id, Chunk.embedding.is_(None))
+        )
+    )
     if remaining:
-        report.fail(f"{len(remaining)} chunk(s) still unembedded after backfill: {remaining}")
+        report.fail(f"{len(remaining)} Demo Org chunk(s) still unembedded after backfill: {remaining}")
 
 
 def seed(db: Session, embedding_provider: EmbeddingProvider | None = None) -> SeedReport:
@@ -353,7 +364,7 @@ def seed(db: Session, embedding_provider: EmbeddingProvider | None = None) -> Se
     db.commit()
 
     provider = embedding_provider or BgeEmbeddingProvider()
-    _embed_chunks(db, provider, report)
+    _embed_chunks(db, org, provider, report)
     db.commit()
 
     return report

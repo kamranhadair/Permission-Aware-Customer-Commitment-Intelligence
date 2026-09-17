@@ -142,12 +142,12 @@ Where to look for each concern:
 
 ### Milestone 7 — real frontend/backend integration
 
-- **Trusted identity boundary**: the browser may pick a demo persona (that's the point of the demo), but only `src/app/actions.ts`'s `setDemoUser` Server Action ever writes the `demo_user_id` cookie (`httpOnly`), and only after checking the submitted id against the live `GET /dev/demo-users` registry. Every server-side read re-verifies that cookie's value against the same registry before treating it as a usable identity (`resolveIdentity`) — a missing, malformed, forged, or reseed-stale cookie value resolves to "unresolved," never a guessed/forced identity. `X-User-Id` is set in exactly two places: `serverClient.ts` (Server Component reads) and `src/app/api/answer/route.ts` (the one Route Handler behind the client-interactive Ask panel) — the browser never constructs it itself, and `AskAccountPanel`'s `fetch("/api/answer", ...)` body only ever contains `{query, account_slug}`.
-- **No CORS, no rewrite proxy**: every FastAPI call is server-to-server (Next server → FastAPI); the browser only ever talks to the Next.js app itself. `BACKEND_URL` (`frontend/.env.local`, from `frontend/.env.example`) is server-only, never `NEXT_PUBLIC_*`.
+- **Trusted identity boundary**: the browser may pick a demo persona (that's the point of the demo), but only `src/app/actions.ts`'s `setDemoUser` Server Action ever writes the `demo_user_id` cookie (`httpOnly`, `sameSite: "lax"`, explicit `path: "/"` so it applies to every route — `/`, `/accounts/*`, `/search`, and both `/api/*` handlers — and only after checking the submitted id against the live `GET /dev/demo-users` registry. Every server-side read re-verifies that cookie's value against the same registry before treating it as a usable identity (`resolveIdentity`) — a missing, malformed, forged, or reseed-stale cookie value resolves to "unresolved," never a guessed/forced identity. `X-User-Id` is set in exactly three places: `serverClient.ts` (Server Component reads) and the two narrow Route Handlers, `src/app/api/answer/route.ts` and `src/app/api/search/route.ts` — the browser never constructs it itself, and each handler's body is strictly validated to its own known field set (`{query, account_slug}` for answer, `{query, account_slug?}` for search) before being forwarded, so a client-asserted `user_id`/`role`/`groups`/`org_id` is rejected with a `400`, never silently forwarded.
+- **No CORS, no rewrite proxy**: every FastAPI call is server-to-server (Next server → FastAPI); the browser only ever talks to the Next.js app itself. `BACKEND_URL` (`frontend/.env.local`, from `frontend/.env.example`) is server-only, never `NEXT_PUBLIC_*` — confirmed absent from the built client bundle.
 - **`GET /dev/demo-users`**: dev/demo-only, mounted only when `ENABLE_DEMO_MODE=true` (`backend/.env`); returns only `{id, name, email, label}`, resolved from the single persistent "Demo Org" (`backend/src/app/demo/org.py`), which fails closed (500, ids logged server-side only, never guesses via `.first()`) if more than one org is ever named that.
-- **Persistent demo seed**: `backend/src/app/demo/seed.py` (`python -m app.demo.seed`) — independent of `app.evaluation.*` (that module is scratch/cleanup-oriented by design); reuses only ordinary production primitives (Milestone 3 parsers/ingestion service, plain ORM models, the real embedding provider/backfill). Convergent and idempotent: reruns check each expected row by its own natural key and report `NEW`/`OK`/`FAIL` per item rather than silently no-op'ing or duplicating. Seeds one account (`acme-corp`) and two personas — Maya Chen (`account-management`) and Lena Ortiz (`product`) — telling the flagship SSO-commitment-with-a-hidden-Product-conflict story from `PRODUCT_SPEC.md`.
+- **Persistent demo seed**: `backend/src/app/demo/seed.py` (`python -m app.demo.seed`) — independent of `app.evaluation.*` (that module is scratch/cleanup-oriented by design); reuses only ordinary production primitives (Milestone 3 parsers/ingestion service, plain ORM models, the real embedding provider/backfill). Convergent and idempotent: reruns check each expected row by its own natural key and report `NEW`/`OK`/`FAIL` per item rather than silently no-op'ing or duplicating. Seeds one account (`acme-corp`) and two personas — Maya Chen (`account-management`) and Lena Ortiz (`product`) — telling the flagship SSO-commitment-with-a-hidden-Product-conflict story from `PRODUCT_SPEC.md`. `retrieval/embed_missing.py`'s `embed_missing_chunks` gained an optional `org_id` keyword, enforced in the SQL `WHERE` clause (never a Python-side filter after loading rows) — the seed always passes its own Demo Org's id, so it can never touch an unrelated org's unembedded chunks; the standalone `python -m app.retrieval.embed_missing` CLI keeps its original global (`org_id=None`) default unchanged.
 - **`/` and `/accounts/[slug]`** are real (`GET /accounts`, `GET /accounts/{slug}`, `GET /accounts/{slug}/commitments`); the account page embeds `AskAccountPanel` (`POST /api/answer` → `POST /answer`), rendering `answered`/`insufficient_evidence`/`not_found`/`operational_error` as four visibly distinct states (a `502` is never reworded into "no evidence exists").
-- **`/search`** calls real `POST /search` server-side (a plain GET-form page, not a client fetch — no Route Handler was needed for it, unlike the Ask panel) and renders backend ordering as-is; `lexical_rank`/`vector_rank`/`hybrid_score` are stripped in `mapRetrievalHit` rather than surfaced as a ranking-debug UI.
+- **`/search`** is a plain server-rendered GET-form page (`src/app/search/page.tsx`) calling `POST /search` directly via `serverClient.ts` — a Server Component is already a trusted server context, so it doesn't need to round-trip through this app's own Route Handler the way a client component would. `POST /api/search` (`src/app/api/search/route.ts`) exists as the narrow, identity-safe, client-facing counterpart for any future interactive search UI, mirroring `/api/answer`'s validation/identity pattern exactly, even though nothing currently calls it. Both the page and the handler render/return backend ordering as-is; `lexical_rank`/`vector_rank`/`hybrid_score` are stripped in `mapRetrievalHit` rather than surfaced as a ranking-debug UI.
 - **`/audit`** was removed from primary navigation and left as an honest static placeholder — Milestone 4/5's retrieval/generation traces are real but were never turned into a persisted, browsable feature, and Milestone 7 did not fabricate one just because the route already existed.
 - **Account fields**: the backend's `Account` model has no ARR/renewal-date/owner/segment columns — `AccountOverview` renders only `name` + the real commitment summary, not the old mock's fabricated CRM fields.
 - **Evidence fields**: cards render `source`/`title`/`occurred_at`/`content` only — `sensitivity` exists on `ChunkOut` but was deliberately left unrendered (no concrete product use for it yet); `allowedUsers`/`allowedGroups`/ACL fields don't exist on any frontend type at all.
@@ -662,16 +662,19 @@ Status: COMPLETE
 Result:
 The Next.js frontend now runs against the real backend for /, /accounts/
 [slug], and an embedded account-page "Ask about this account" panel
-(POST /answer); /search calls real POST /search. Every authorization-
-sensitive read is server-side (Server Components using
-frontend/src/lib/api/serverClient.ts, cache: "no-store" throughout); the
-one browser-facing interactive surface, the Ask panel, talks only to a
-same-origin Route Handler (src/app/api/answer/route.ts) that resolves
-identity from a registry-verified session cookie and rejects any request
-body carrying extra fields (user_id/role/groups/org_id/...) with a 400
-before it can ever reach FastAPI. The browser never constructs X-User-Id
-itself. No CORS middleware was added to FastAPI and no next.config.ts
-rewrite was needed — every backend call is server-to-server.
+(POST /answer); /search calls real POST /search server-side. Every
+authorization-sensitive read is server-side (Server Components using
+frontend/src/lib/api/serverClient.ts, cache: "no-store" throughout). Two
+narrow, same-origin Route Handlers — src/app/api/answer/route.ts (behind
+the account page's Ask panel) and src/app/api/search/route.ts (available
+for any future client-interactive search UI, even though the current
+/search page doesn't need it) — resolve identity from a registry-verified
+session cookie and strictly validate their request bodies to their own
+known field set, rejecting anything else (user_id/role/groups/org_id/...)
+with a 400 before it can ever reach FastAPI. The browser never constructs
+X-User-Id itself. No CORS middleware was added to FastAPI and no
+next.config.ts rewrite was needed — every backend call is server-to-server,
+confirmed absent from the built client JS bundle.
 
 A new dev-only GET /dev/demo-users endpoint (mounted only when
 ENABLE_DEMO_MODE=true) lets the frontend discover currently valid demo
@@ -685,31 +688,48 @@ production primitives (Milestone 3 parsers/ingestion service, plain ORM
 models, the real embedding provider) and is convergent/idempotent rather
 than a one-shot script: rerunning it checks each expected row by its own
 natural key and self-heals drift (e.g. a corrected account display name)
-rather than silently no-op'ing or duplicating.
+rather than silently no-op'ing or duplicating. A follow-up correctness
+pass scoped its embedding step to Demo Org specifically: the shared
+retrieval/embed_missing.py:embed_missing_chunks helper gained an optional
+org_id keyword (enforced in SQL, not a Python-side filter), so the seed
+can never mutate embeddings on unrelated development data outside Demo
+Org, while the standalone global-backfill CLI keeps its original
+org_id=None default.
 
-7 new backend tests (test_dev_identities.py, test_demo_seed.py) and 5 new/
-rewritten frontend test files (session, validation, mapping, askReducer,
-plus adapted commitments/dashboard tests for the new view-model shapes) —
-230/230 backend tests pass, alembic check reports zero drift, 39/39
-frontend tests pass, frontend typecheck and production build are clean.
-mockData.ts, lib/permissions.ts, lib/search.ts, and SearchAnswerPanel.tsx
-were deleted after confirming zero remaining runtime consumers by grep.
+9 new backend test files/additions (test_dev_identities.py,
+test_demo_seed.py, test_embed_missing.py) and 5 new/rewritten frontend
+test files (session, validation, mapping, askReducer, plus adapted
+commitments/dashboard tests for the new view-model shapes) — 233/233
+backend tests pass, alembic check reports zero drift, 45/45 frontend
+tests pass, frontend typecheck and production build are clean. mockData.ts,
+lib/permissions.ts, lib/search.ts, and SearchAnswerPanel.tsx were deleted
+after confirming zero remaining runtime consumers by grep (re-verified:
+`rg "mockData|filterPermittedEvidence|from.*lib/search|allowedUsers|
+allowedGroups" frontend/src` matches only explanatory comments, no
+imports/usages).
 
-A full manual smoke was run against the real backend and the persistent
-demo seed (real BAAI/bge-small-en-v1.5 embeddings): Maya Chen (account-
-management) sees both demo commitments with no conflict badge; Lena Ortiz
-(product) sees the same two commitments with the SSO commitment's conflict
-badge visible, including the confidential Slack evidence text ("...is
-exploratory...") that Maya never receives. A nonexistent account and an
-unresolved-session state both render the same neutral copy, never a
-permission-specific message. POST /api/answer correctly returned 401
-without a session cookie, 400 for a body carrying extra user_id/role
-fields (never forwarded to FastAPI), and — for a real question asked
-through the full stack — a 502/operational_error, which the request log
-confirmed was a genuine Gemini free-tier quota exhaustion at the backend
-(POST /answer itself returned 502), not a frontend integration bug; the
-Route Handler correctly surfaced this as "temporarily unavailable" rather
-than mislabeling it as "no evidence exists." Per Milestone 6's already-
+A full manual smoke was run (twice — once before and once after the
+correction pass above, with servers restarted against the reseeded state)
+against the real backend and the persistent demo seed (real
+BAAI/bge-small-en-v1.5 embeddings): Maya Chen (account-management) sees
+both demo commitments with no conflict badge and does not receive the
+confidential Slack evidence text; Lena Ortiz (product) sees the same two
+commitments with the SSO commitment's conflict badge visible, including
+that confidential evidence ("...is exploratory..."). A nonexistent
+account and an unresolved-session state both render the same neutral
+"This page could not be found"/"Choose a demo persona" copy, never a
+permission-specific message. A forged `demo_user_id=999999` cookie was
+tried directly: the account page fell back to the unresolved-session
+state and POST /api/answer returned 401 — the backend request log
+confirms FastAPI never received a request for that id at all, only the
+identity-free GET /dev/demo-users lookup. POST /api/answer also correctly
+returned 400 for a body carrying an extra user_id/role field (never
+forwarded to FastAPI), and — for a real question asked through the full
+stack — a 502/operational_error, which the request log confirmed was a
+genuine Gemini free-tier quota exhaustion at the backend (POST /answer
+itself returned 502), not a frontend integration bug; the Route Handler
+correctly surfaced this as "temporarily unavailable" rather than
+mislabeling it as "no evidence exists." Per Milestone 6's already-
 documented quota pattern (~1-2 live calls/day), no further live attempts
 were made — automated tests do not depend on Gemini either way.
 
@@ -719,10 +739,13 @@ Key decisions, for quick reference:
   writing the httpOnly cookie) → server-side resolveIdentity (re-verifies
   the cookie value against that same registry on every read, so a
   forged/stale/arbitrary DB id is "unresolved," never a usable identity)
-  → X-User-Id, set only in serverClient.ts and the /api/answer Route
-  Handler. No cookie-signing infrastructure was added — registry
-  re-verification on every read is what makes an HttpOnly cookie's mere
-  presence insufficient to trust on its own.
+  → X-User-Id, set only in serverClient.ts and the two Route Handlers
+  (/api/answer, /api/search). No cookie-signing infrastructure was
+  added — registry re-verification on every read is what makes an
+  HttpOnly cookie's mere presence insufficient to trust on its own; the
+  cookie is also written with an explicit path="/" so the same session
+  applies across every route (/, /accounts/*, /search, both /api/*
+  handlers) rather than relying on browser default cookie-path behavior.
 - AskAccountPanel is keyed by `${accountSlug}:${personaId}` — a demo
   persona's numeric id is fine to use as a React identity key (it's never
   used to construct an auth header client-side), and this key change is

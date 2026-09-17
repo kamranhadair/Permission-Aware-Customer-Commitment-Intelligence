@@ -20,26 +20,39 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
-from app.models import Chunk
+from app.models import Account, Chunk, SourceDocument
 from app.retrieval.embeddings import BgeEmbeddingProvider, EmbeddingProvider
 
 DEFAULT_BATCH_SIZE = 64
 
 
-def embed_missing_chunks(session: Session, provider: EmbeddingProvider, batch_size: int = DEFAULT_BATCH_SIZE) -> int:
+def embed_missing_chunks(
+    session: Session,
+    provider: EmbeddingProvider,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    *,
+    org_id: int | None = None,
+) -> int:
     """Embeds every chunk with embedding IS NULL, in batches, committing per
-    batch. Returns the total number embedded. Shared by this CLI and the
-    Milestone 7 demo seed (backend/src/app/demo/seed.py) — both need the
-    exact same "embed whatever isn't embedded yet" behavior, not a second
-    implementation of it.
+    batch. Returns the total number embedded. Shared by this CLI (global
+    backfill, org_id=None — the default, unchanged behavior) and the
+    Milestone 7 demo seed (backend/src/app/demo/seed.py, which always
+    passes org_id=<Demo Org's id> so it can never touch unrelated
+    development data belonging to another org). The scope is applied in
+    the SQL WHERE clause, not by loading chunks and filtering in Python.
     """
     total = 0
     while True:
-        chunks = list(
-            session.scalars(
-                select(Chunk).where(Chunk.embedding.is_(None)).order_by(Chunk.id).limit(batch_size)
+        stmt = select(Chunk).where(Chunk.embedding.is_(None))
+        if org_id is not None:
+            stmt = (
+                stmt.join(SourceDocument, SourceDocument.id == Chunk.document_id)
+                .join(Account, Account.id == SourceDocument.account_id)
+                .where(Account.org_id == org_id)
             )
-        )
+        stmt = stmt.order_by(Chunk.id).limit(batch_size)
+
+        chunks = list(session.scalars(stmt))
         if not chunks:
             break
         embeddings = provider.embed_documents([chunk.content for chunk in chunks])

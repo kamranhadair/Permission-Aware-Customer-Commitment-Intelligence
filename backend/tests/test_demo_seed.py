@@ -8,9 +8,10 @@ from sqlalchemy import func, select
 
 from app.demo.org import DEMO_ORG_NAME, AmbiguousDemoOrgError, resolve_demo_org
 from app.demo.seed import seed
-from app.models import Account, Commitment, Group, Organization, User
+from app.models import Account, Chunk, Commitment, Group, Organization, SourceDocument, User
 from app.permissions.resolver import get_user_context, get_visible_commitments
 from app.retrieval.embeddings import FakeEmbeddingProvider
+from tests.factories import make_account, make_chunk, make_document, make_org
 
 
 def test_fresh_seed_converges_and_demonstrates_permission_split(db):
@@ -81,3 +82,29 @@ def test_ambiguous_demo_org_aborts_before_any_write(db):
     # Nothing beyond the two pre-existing org rows was created.
     assert db.scalar(select(func.count()).select_from(Account)) == 0
     assert db.scalar(select(func.count()).select_from(User)) == 0
+
+
+def test_embedding_step_never_touches_another_orgs_unembedded_chunks(db):
+    other_org = make_org(db, "Unrelated Dev Org")
+    other_account = make_account(db, other_org, "unrelated-acct")
+    other_chunk = make_chunk(db, make_document(db, other_account), content="unrelated dev data")
+
+    report = seed(db, embedding_provider=FakeEmbeddingProvider())
+    assert not report.failed, report.render()
+
+    db.refresh(other_chunk)
+    assert other_chunk.embedding is None
+
+    # And the seed's own chunks (a different org) did get embedded.
+    org = resolve_demo_org(db)
+    demo_chunks = list(
+        db.scalars(
+            select(Chunk)
+            .join(SourceDocument, SourceDocument.id == Chunk.document_id)
+            .join(Account, Account.id == SourceDocument.account_id)
+            .where(Account.org_id == org.id)
+        )
+    )
+    assert demo_chunks, "expected the demo seed to have ingested at least one chunk"
+    for chunk in demo_chunks:
+        assert chunk.embedding is not None
