@@ -112,9 +112,9 @@ A measurement layer now exists at `backend/src/app/evaluation/`, over everything
 - **Session lifecycle, cleanup, and dataset validation** (added in a follow-up correctness pass before the baseline was trusted — see `docs/evaluation.md`'s "Bugs found and fixed"): `run()` takes an optional `db: Session`; a caller-supplied session (pytest) is used as-is and never closed, while a runner-owned session (the standalone CLI default) always attempts `cleanup.cleanup_eval_orgs()` in `finally` — success, a mid-run exception, or a validation failure all clean up the exact org that run seeded, and a cleanup failure is printed as a warning without masking the original error. `dataset_validation.py` proves every golden case's `expected_evidence`/`forbidden_evidence` against the real seeded database (resolves to exactly one document; `forbidden_evidence` is actually outside the persona's permitted set; the two never overlap) before any case is scored, replacing a "by construction" assumption with a real check. `RunReport` exposes `automated_security_all_clear` / `manual_security_review_status` / `overall_security_status` (not a single boolean) — a failing freshness sequence now correctly fails `automated_security_all_clear`, and `overall_security_status` is `"pending_review"`, not a false `"passed"`, whenever a required manual gate hasn't been adjudicated yet.
 - **Security mode exercises generation structurally too** (a gap caught on further review: security mode built a `FakeAnswerGenerator` but never called it, so the full-dataset baseline never exercised context construction/citation validation, only retrieval): for every non-`retrieval_only` case, `--mode security` now runs the real `_run_generation_case_with_visibility` orchestration with a deterministic, cooperative `security_mode_fake_answer` (cites only ids it was actually given, so `validate_and_filter_claims`'s real cross-commitment-provenance branch executes on every commitment case) and `_generation_structural_gates()` (shared with real `--mode generation`, minus the answer-quality scoring on top) — a clean retrieval pass can no longer mask a generation-context/citation violation on the same case. Still reports no quality metrics and designates no case for manual review in this mode.
 - **Tests**: `backend/tests/test_evaluation_{schema,metrics,security_gates,freshness,privilege_isolation,runner_fake_mode,cleanup,session_lifecycle,security_status,dataset_validation,resume,security_mode_generation,report}.py`, 63 new tests, all network-free. `test_retrieval_quality.py` was rewritten to wrap `--mode retrieval` instead of the retired `retrieval/evaluate.py`. 223/223 backend tests pass overall; `permissions/resolver.py`, `retrieval/*`, and `generation/*` were **not modified**.
-- **Baseline results** (security/retrieval re-verified 2026-09-16 after all three correctness passes with identical security-relevant numbers; generation baseline extended 2026-09-16 in a follow-up session): `--mode security` — `overall_security_status = passed` across the full 50-case dataset and all 3 freshness sequences, now including real generation-path coverage (zero unauthorized chunks/commitment-evidence/citations across all 50 cases and all 6 personas, not just retrieval), confirmed to leave zero scratch rows in the database afterward (automatic cleanup, not manual). `--mode retrieval` (real embeddings) — `overall_security_status = passed`, Recall@5 = Recall@10 = 1.00 in every Recall-eligible category, MRR 0.80–1.00 (overall MRR 0.894 across 33 Recall-eligible cases); no retrieval bug found. `--mode generation` (real Gemini) — 6 of 50 cases reached a real terminal outcome before the free tier's 20-requests/day quota locked out the rest (confirmed via a direct API probe outside the evaluation runner, not inferred): 3 live model answers (`dl-01`, `dl-02`, `cds-02`), each fully correct (`status_correct`/`citation_correct`/`citation_complete`/`forbidden_absent` all `True`, zero security violations) — `cds-02` is a genuine 3-document cross-doc-synthesis success spanning the full `customer_expectation → product_approved → contractual` authority progression; 3 more (`pr-05`/`pr-07`/`pr-08`) completed structurally via the `account_not_visible` short-circuit (no model call needed). The remaining 44 were correctly recorded as `generation_failure` with zero security violations; `--resume`'s skip/retry behavior was verified against the persisted `.eval-output/generation-latest.json` ground truth (exactly the 6 completed cases were skipped on a second `--resume` pass, exactly the 44 incomplete ones were retried). The live prompt-injection case and one live end-to-end `POST /answer` round trip, both carried forward from Milestone 5, remain untried — quota, not oversight. See `docs/evaluation.md` for full detail, including why Recall/MRR are only computed for cases with real `expected_evidence` (retrieval has no relevance threshold, so `expected_evidence: []` cases would score a structurally-guaranteed 0 regardless of quality) and why `--mode security`/`retrieval` cannot check the `answered` vs. `insufficient_evidence` distinction (that judgment only exists at the generation layer).
-- **This is a "Commit 1 only" milestone for product code.** Every bug found during implementation — across all three evaluation-harness correctness passes — was in the new Milestone 6 evaluation infrastructure itself (org-scoping in stable-id resolution, a composite-primary-key assumption in the freshness mutator, a flawed status heuristic in non-generation modes, missing `.env` loading in the CLI entry point, missing standalone-run cleanup, an incomplete security-status computation, unvalidated "by construction" dataset trust, and an over-eager `--resume` completion check) — none were found in the Milestone 2–5 product code, and the follow-up real-Gemini generation baseline (6/50 cases, all correct where completed) found none either. Manufacturing a `fix:` commit against `retrieval/`, `generation/`, or `permissions/` with no evidence a fix was needed would misrepresent a clean result as a found-and-fixed one; see `docs/evaluation.md`'s "Bugs found and fixed" section for the full, honest list of what *was* found and where. The evaluation harness itself did warrant its own correctness commit, which is a different thing from tuning the product to pass the eval.
-- **Known limitations**: `cross_doc_synthesis` and `conflicting_evidence` are honestly below their nominal 10+ targets (documented, not padded); the real-Gemini baseline covers 6 of 50 cases (3 live answers, 3 structural completions; quota, not a design gap) — the live prompt-injection case and one live `POST /answer` HTTP round trip, both carried over from Milestone 5, remain untried for the same reason; the two manual-review security gates are `pending_review`, not `pass`, for every designated `conflicting_evidence`/`prompt_injection` case since none of those specific categories received a live model response yet; a standalone run's cleanup only runs on an ordinary Python exception path (a `finally` block) — a hard process kill between seeding and cleanup would still require manual cleanup, though this was not observed. No production-readiness claim.
+- **Baseline results** (security/retrieval re-verified 2026-09-16 after all three correctness passes with identical security-relevant numbers; generation baseline extended across 2026-09-16 and 2026-09-17): `--mode security` — `overall_security_status = passed` across the full 50-case dataset and all 3 freshness sequences, now including real generation-path coverage (zero unauthorized chunks/commitment-evidence/citations across all 50 cases and all 6 personas, not just retrieval), confirmed to leave zero scratch rows in the database afterward (automatic cleanup, not manual). `--mode retrieval` (real embeddings) — `overall_security_status = passed`, Recall@5 = Recall@10 = 1.00 in every Recall-eligible category, MRR 0.80–1.00 (overall MRR 0.894 across 33 Recall-eligible cases); no retrieval bug found. `--mode generation` (real Gemini, across two calendar days) — 8 of 50 cases have reached a real terminal outcome; `overall_security_status` for this mode is honestly reported as `pending_review`, never forced to `passed`/`failed`, since no manual-review-designated case has live content yet to adjudicate. 5 live model answers (`dl-01`, `dl-02`, `dl-03`, `dl-04`, `cds-02`), zero security violations each; 4 of 5 fully correct — `cds-02` is a genuine 3-document cross-doc-synthesis success spanning the full `customer_expectation → product_approved → contractual` authority progression. `dl-03` scored `citation_correct = False`, classified as a `golden_data_problem` (the golden `expected_evidence` under-names what bob is actually, correctly, permitted to cite — see `docs/evaluation.md`), not a product bug — no fix made. 3 more (`pr-05`/`pr-07`/`pr-08`) completed structurally via the `account_not_visible` short-circuit (no model call needed). The remaining 42 were correctly recorded as `generation_failure` with zero security violations; `--resume`'s skip/retry behavior was re-verified against persisted ground truth on both days. Observed refill is a small, roughly fixed daily allotment (~1–2 live calls/day), not a fast trickle — completing all 42 remaining cases on the free tier would take many more days. The live prompt-injection case and one live end-to-end `POST /answer` round trip, both carried forward from Milestone 5, remain untried — quota, not oversight. See `docs/evaluation.md` for full detail, including why Recall/MRR are only computed for cases with real `expected_evidence` (retrieval has no relevance threshold, so `expected_evidence: []` cases would score a structurally-guaranteed 0 regardless of quality) and why `--mode security`/`retrieval` cannot check the `answered` vs. `insufficient_evidence` distinction (that judgment only exists at the generation layer).
+- **This is a "Commit 1 only" milestone for product code.** Every bug found during implementation — across all three evaluation-harness correctness passes — was in the new Milestone 6 evaluation infrastructure itself (org-scoping in stable-id resolution, a composite-primary-key assumption in the freshness mutator, a flawed status heuristic in non-generation modes, missing `.env` loading in the CLI entry point, missing standalone-run cleanup, an incomplete security-status computation, unvalidated "by construction" dataset trust, and an over-eager `--resume` completion check) — none were found in the Milestone 2–5 product code, and the follow-up real-Gemini generation baseline (8/50 cases; the one imperfect result was a golden-data precision gap, not a product bug) found none either. Manufacturing a `fix:` commit against `retrieval/`, `generation/`, or `permissions/` with no evidence a fix was needed would misrepresent a clean result as a found-and-fixed one; see `docs/evaluation.md`'s "Bugs found and fixed" section for the full, honest list of what *was* found and where. The evaluation harness itself did warrant its own correctness commit, which is a different thing from tuning the product to pass the eval.
+- **Known limitations**: `cross_doc_synthesis` and `conflicting_evidence` are honestly below their nominal 10+ targets (documented, not padded); the real-Gemini baseline covers 8 of 50 cases (5 live answers, 3 structural completions; quota, not a design gap) — the live prompt-injection case and one live `POST /answer` HTTP round trip, both carried over from Milestone 5, remain untried for the same reason; the two manual-review security gates, and the real-generation `overall_security_status` itself, remain `pending_review` rather than `pass`/`fail` for every designated `conflicting_evidence`/`prompt_injection` case since none of those specific categories received a live model response yet — completing this honestly requires many more free-tier quota windows or a paid tier, not a redesign; a standalone run's cleanup only runs on an ordinary Python exception path (a `finally` block) — a hard process kill between seeding and cleanup would still require manual cleanup, though this was not observed. No production-readiness claim.
 
 ## Current architecture
 
@@ -531,7 +531,7 @@ No schema migration. Frontend untouched.
 
 Baseline (security/retrieval re-verified 2026-09-16 after all three
 correctness passes with identical security-relevant numbers; generation
-baseline extended 2026-09-16 in a follow-up session): --mode security —
+baseline extended across 2026-09-16 and 2026-09-17): --mode security —
 overall_security_status=passed, full dataset + all 3 freshness sequences
 pass, now including real generation-path coverage (zero unauthorized
 chunks/commitment-evidence/citations across all 50 cases and all 6
@@ -539,27 +539,36 @@ personas), confirmed to leave zero scratch rows in the database
 afterward. --mode retrieval (real BAAI/bge-small-en-v1.5) —
 overall_security_status=passed, Recall@5=Recall@10=1.00 in every
 Recall-eligible category (overall MRR 0.894 across 33 eligible cases);
-no retrieval bug found. --mode generation (real Gemini) — 6 of 50 cases
-reached a real terminal outcome (3 live model answers — dl-01, dl-02,
-cds-02, every one fully correct with zero security violations; cds-02 a
-genuine 3-document cross-doc-synthesis success spanning the full
-customer_expectation -> product_approved -> contractual authority
-progression — plus 3 structural account_not_visible completions needing
-no model call) before the free tier's 20-requests/day quota locked out
-the remaining 44, confirmed via a direct API probe outside the evaluation
-runner. Every blocked case correctly surfaced as generation_failure with
-zero security violations; --resume's skip/retry behavior was verified
-against persisted ground truth (exactly the 6 completed cases skipped on
-a second --resume pass, exactly the 44 incomplete ones retried). The live
-prompt-injection case and one live end-to-end POST /answer round trip,
-both carried over from Milestone 5, remain untried — quota, not
-oversight. This is a "Commit 1 only" milestone for product code: every
-bug found (across all three evaluation-harness correctness passes) was in
-the new evaluation infrastructure itself, none in the product code
-evaluation measured, and the follow-up real-Gemini baseline (6/50 cases,
-all correct where completed) found none either — see docs/evaluation.md's
-"Bugs found and fixed" section for the honest, itemized list rather than
-a manufactured fix: commit.
+no retrieval bug found. --mode generation (real Gemini, across two
+calendar days) — 8 of 50 cases have reached a real terminal outcome (5
+live model answers — dl-01, dl-02, dl-03, dl-04, cds-02, zero security
+violations each; cds-02 a genuine 3-document cross-doc-synthesis success
+spanning the full customer_expectation -> product_approved -> contractual
+authority progression — plus 3 structural account_not_visible completions
+needing no model call). 4 of the 5 live answers scored fully correct;
+dl-03 scored citation_correct=False, classified as a golden_data_problem
+(bob's answer correctly cited a second, genuinely relevant permitted
+document — C-GLOBEX-UPDATE, the Globex timeline-reversal fixture — that
+the golden expected_evidence list simply didn't name), not a product bug,
+and no fix was made. The remaining 42 cases were correctly recorded as
+generation_failure with zero security violations, confirmed via repeated
+direct API probes outside the evaluation runner on both days; observed
+refill is a small, roughly fixed daily allotment (~1-2 live calls/day),
+not a fast trickle, so completing all 42 remaining cases on the free tier
+would take many more days of --resume, not one more session.
+overall_security_status for the real-generation mode is honestly reported
+as pending_review, never forced to passed/failed, because no manual-
+review-designated case (conflicting_evidence/prompt_injection) has live
+content yet to adjudicate. The live prompt-injection case and one live
+end-to-end POST /answer round trip, both carried over from Milestone 5,
+remain untried — quota, not oversight. This is a "Commit 1 only"
+milestone for product code: every bug found (across all three evaluation-
+harness correctness passes) was in the new evaluation infrastructure
+itself, none in the product code evaluation measured, and the follow-up
+real-Gemini baseline (8/50 cases; the one imperfect result was a
+golden-data precision gap, not a product bug) found none either — see
+docs/evaluation.md's "Bugs found and fixed" section for the honest,
+itemized list rather than a manufactured fix: commit.
 
 Key decisions, for quick reference:
 - Document-level stable identity ({source, external_id}), never a raw
@@ -591,6 +600,18 @@ Key decisions, for quick reference:
 - The real-Gemini baseline remains incomplete (quota, not a design gap)
   and the architecture was explicitly not changed in response, per this
   milestone's own instruction not to redesign around free-tier limits.
+- A real-generation case with an imperfect score is classified before any
+  fix is considered (retrieval_failure / context_selection_failure /
+  authority_provenance_failure / citation_validation_failure /
+  prompt_generation_failure / golden_data_problem /
+  provider_quota_failure). dl-03's citation_correct=False was a
+  golden_data_problem (the fixture's expected_evidence under-named what
+  was actually valid, permitted evidence) — no product code or dataset
+  was changed just to make the score look better.
+- overall_security_status for a real-generation run is never forced to
+  passed/failed when a required manual-review gate has no live content to
+  adjudicate yet; it stays pending_review honestly rather than reporting
+  a false verdict in either direction.
 - A caller-supplied session (db=<session>) is used exactly as given and
   never closed by the runner; a runner-owned session (the standalone CLI
   default) always attempts org-scoped cleanup in finally regardless of

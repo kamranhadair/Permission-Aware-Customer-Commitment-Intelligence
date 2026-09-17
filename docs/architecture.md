@@ -248,14 +248,20 @@ one canonical runner, `python -m app.evaluation.run`, replacing the
     not merely asserted
 
 STILL FUTURE
-the full real-Gemini baseline across all 50 cases (6 of 50 reached a real
-  terminal outcome — 3 live model answers, all correct, plus 3 structural
-  account_not_visible completions — before the free tier's 20-requests/day
-  cap locked out the rest; confirmed via a direct API probe outside the
-  evaluation runner; not a design gap — see docs/evaluation.md's baseline
-  results); the live prompt-injection case and one live end-to-end
-  POST /answer round trip, both carried forward from Milestone 5, remain
-  untried for the same quota reason
+the full real-Gemini baseline across all 50 cases (8 of 50 reached a real
+  terminal outcome as of 2026-09-17 — 5 live model answers (4 fully correct,
+  1 a documented golden-data precision gap, not a product bug) plus 3
+  structural account_not_visible completions — before the free tier's
+  20-requests/day cap locked out the rest each day; confirmed via direct API
+  probes outside the evaluation runner on two separate calendar days,
+  showing a small fixed daily allotment rather than a fast trickle; not a
+  design gap — see docs/evaluation.md's baseline results); the live
+  prompt-injection case and one live end-to-end POST /answer round trip,
+  both carried forward from Milestone 5, remain untried for the same quota
+  reason; the real-generation overall_security_status is honestly reported
+  as pending_review (not forced to passed/failed) until a designated
+  conflicting_evidence/prompt_injection case has live content to
+  manually adjudicate
 an LLM-as-judge or any other automated proxy for claim-level factual
   correctness or authority/conflict wording quality (deliberately not
   built — see docs/evaluation.md)
